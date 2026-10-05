@@ -16,6 +16,7 @@ typedef struct rdp_peer_context RDPPeerContext;
 typedef struct RDPWebDAVServer  RDPWebDAVServer;
 
 typedef void (*RDPPeerInputCallback)(void *userdata, uint16_t flags, uint16_t code);
+typedef void (*RDPPeerSyncCallback)(void *userdata, uint32_t toggleFlags);
 typedef void (*RDPPeerMouseCallback)(void *userdata, uint16_t flags, uint16_t x, uint16_t y);
 typedef void (*RDPPeerClipboardCallback)(void *userdata, const uint8_t *data, size_t len, uint32_t format);
 typedef void (*RDPPeerReadyCallback)(void *userdata, uint32_t width, uint32_t height, uint32_t colorDepth);
@@ -32,6 +33,7 @@ typedef void (*RDPIrpCallback)(uint32_t ioStatus,
 
 typedef struct {
     RDPPeerInputCallback     onKeyboard;
+    RDPPeerSyncCallback      onSync;      /* TS_SYNC_EVENT toggle-key state */
     RDPPeerMouseCallback     onMouse;
     RDPPeerMouseCallback     onMouseEx;
     RDPPeerClipboardCallback onClipboard;
