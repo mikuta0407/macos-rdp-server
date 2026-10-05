@@ -6,7 +6,7 @@ A lightweight RDP server daemon for macOS Tahoe and later. Connect to your Mac f
 
 - **H.264 hardware encoding** via VideoToolbox — low latency, low CPU
 - **CGVirtualDisplay** — creates a dedicated virtual display for each session; your physical screen is undisturbed
-- **Full keyboard & mouse injection** via CGEventPost with a complete RDP scan-code table
+- **Full keyboard & mouse injection** via CGEventPost with a complete RDP scan-code table — JIS/ISO/ANSI aware, IME keys, Unicode input
 - **Bidirectional clipboard** — text and images sync between client and host
 - **System audio redirection** — hear your Mac's audio through the RDP client
 - **Structured logging** — four levels (ERROR / INFO / VERBOSE / DEBUG), set via flag or env var
@@ -70,15 +70,25 @@ After installation, open any RDP client and connect to your Mac's IP address.
 
 ```bash
 # 1. Install dependencies
-brew install freerdp cmake openssl
+brew install freerdp cmake openssl pkgconf
 
 # 2. Clone
 git clone https://github.com/grioghar/macos-rdp-server.git
 cd macos-rdp-server
 
-# 3. Build & install
-sudo bash scripts/install.sh
+# 3. Build
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH="$(brew --prefix freerdp):$(brew --prefix openssl)"
+cmake --build build
+
+# 4. Install as a per-user LaunchAgent (no sudo; see the note above)
+scripts/install-user.sh build/macos-rdp-daemon
 ```
+
+`install-user.sh` turns the self-updater off by default (`RDP_UPDATE_ENABLED=0`)
+because it would replace your build with the upstream release. Settings such as
+`RDP_LOG_LEVEL`, `RDP_KEYBOARD_TYPE` or `RDP_SWAP_CTRL_CMD` can be passed in the
+environment when running it. Japanese / JIS keyboard notes: [docs/JAPANESE-SETUP.md](docs/JAPANESE-SETUP.md).
 
 ## Connect
 
