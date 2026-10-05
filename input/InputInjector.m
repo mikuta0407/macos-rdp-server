@@ -1,76 +1,127 @@
 #import "input/InputInjector.h"
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import <Carbon/Carbon.h>
 #import <syslog.h>
 #define RDP_LOG_COMPONENT "input"
 #include "logging/RDPLog.h"
 
-/* RDP scan code → macOS virtual key code mapping (subset, covering common keys).
-   Full table follows USB HID Usage Tables §10 and Mac OS X keycodes. */
-static const uint16_t kScanToVK[256] = {
-    [0x01] = 53,  /* Esc */
-    [0x02] = 18,  /* 1 */  [0x03] = 19,  /* 2 */  [0x04] = 20,  /* 3 */
-    [0x05] = 21,  /* 4 */  [0x06] = 23,  /* 5 */  [0x07] = 22,  /* 6 */
-    [0x08] = 26,  /* 7 */  [0x09] = 28,  /* 8 */  [0x0A] = 25,  /* 9 */
-    [0x0B] = 29,  /* 0 */  [0x0C] = 27,  /* - */  [0x0D] = 24,  /* = */
-    [0x0E] = 51,  /* BS */
-    [0x0F] = 48,  /* Tab */
-    [0x10] = 12,  /* Q */  [0x11] = 13,  /* W */  [0x12] = 14,  /* E */
-    [0x13] = 15,  /* R */  [0x14] = 17,  /* T */  [0x15] = 16,  /* Y */
-    [0x16] = 32,  /* U */  [0x17] = 34,  /* I */  [0x18] = 31,  /* O */
-    [0x19] = 35,  /* P */  [0x1A] = 33,  /* [ */  [0x1B] = 30,  /* ] */
-    [0x1C] = 36,  /* Return */
-    [0x1D] = 59,  /* LCtrl */
-    [0x1E] = 0,   /* A */  [0x1F] = 1,   /* S */  [0x20] = 2,   /* D */
-    [0x21] = 3,   /* F */  [0x22] = 5,   /* G */  [0x23] = 4,   /* H */
-    [0x24] = 38,  /* J */  [0x25] = 40,  /* K */  [0x26] = 37,  /* L */
-    [0x27] = 41,  /* ; */  [0x28] = 39,  /* ' */  [0x29] = 50,  /* ` */
-    [0x2A] = 56,  /* LShift */
-    [0x2B] = 42,  /* \ */
-    [0x2C] = 6,   /* Z */  [0x2D] = 7,   /* X */  [0x2E] = 8,   /* C */
-    [0x2F] = 9,   /* V */  [0x30] = 11,  /* B */  [0x31] = 45,  /* N */
-    [0x32] = 46,  /* M */  [0x33] = 43,  /* , */  [0x34] = 47,  /* . */
-    [0x35] = 44,  /* / */
-    [0x36] = 60,  /* RShift */
-    [0x37] = 67,  /* KP* */
-    [0x38] = 58,  /* LAlt */
-    [0x39] = 49,  /* Space */
-    [0x3A] = 57,  /* CapsLk */
-    [0x3B] = 122, /* F1 */  [0x3C] = 120, /* F2 */  [0x3D] = 99, /* F3 */
-    [0x3E] = 118, /* F4 */  [0x3F] = 96,  /* F5 */  [0x40] = 97, /* F6 */
-    [0x41] = 98,  /* F7 */  [0x42] = 100, /* F8 */  [0x43] = 101,/* F9 */
-    [0x44] = 109, /* F10 */ [0x57] = 103, /* F11 */ [0x58] = 111,/* F12 */
-    [0x47] = 71,  /* KP7/Home */
-    [0x48] = 126, /* Up */
-    [0x4B] = 123, /* Left */
-    [0x4D] = 124, /* Right */
-    [0x50] = 125, /* Down */
-    [0x52] = 114, /* Ins */
-    [0x53] = 117, /* Del */
-    [0x4F] = 119, /* End */
-    [0x49] = 116, /* PgUp */
-    [0x51] = 121, /* PgDn */
+/* ── Scan code → macOS virtual key code ──────────────────────────────────
+ *
+ * RDP sends PC/AT "set 1" scan codes (MS-RDPBCGR 2.2.8.1.1.3.1.1.1), with
+ * KBDFLAGS_EXTENDED for the E0-prefixed keys. Each is mapped to the Mac key at
+ * the same PHYSICAL position — i.e. the keycode a PC keyboard plugged into a
+ * Mac would produce. Which character that key types is then decided by the
+ * Mac's input source together with the event's keyboard type (ANSI/ISO/JIS),
+ * exactly as for a real keyboard.
+ *
+ * Values are the kVK_* constants from HIToolbox/Events.h. kVK_ANSI_A is 0, so
+ * unmapped entries can't be left zero-initialised (they used to be injected as
+ * "A"): the tables are filled with kVKNone first, then from the lists below. */
+
+#define kVKNone 0xFFFF
+
+typedef struct { uint8_t scan; uint16_t vk; } ScanMapping;
+
+static const ScanMapping kScanMappings[] = {
+    {0x01, kVK_Escape},
+    {0x02, kVK_ANSI_1}, {0x03, kVK_ANSI_2}, {0x04, kVK_ANSI_3}, {0x05, kVK_ANSI_4},
+    {0x06, kVK_ANSI_5}, {0x07, kVK_ANSI_6}, {0x08, kVK_ANSI_7}, {0x09, kVK_ANSI_8},
+    {0x0A, kVK_ANSI_9}, {0x0B, kVK_ANSI_0},
+    {0x0C, kVK_ANSI_Minus},          /* JIS: - =  */
+    {0x0D, kVK_ANSI_Equal},          /* JIS: ^ ~  */
+    {0x0E, kVK_Delete},              /* Backspace */
+    {0x0F, kVK_Tab},
+    {0x10, kVK_ANSI_Q}, {0x11, kVK_ANSI_W}, {0x12, kVK_ANSI_E}, {0x13, kVK_ANSI_R},
+    {0x14, kVK_ANSI_T}, {0x15, kVK_ANSI_Y}, {0x16, kVK_ANSI_U}, {0x17, kVK_ANSI_I},
+    {0x18, kVK_ANSI_O}, {0x19, kVK_ANSI_P},
+    {0x1A, kVK_ANSI_LeftBracket},    /* JIS: @ `  */
+    {0x1B, kVK_ANSI_RightBracket},   /* JIS: [ {  */
+    {0x1C, kVK_Return},
+    {0x1D, kVK_Control},
+    {0x1E, kVK_ANSI_A}, {0x1F, kVK_ANSI_S}, {0x20, kVK_ANSI_D}, {0x21, kVK_ANSI_F},
+    {0x22, kVK_ANSI_G}, {0x23, kVK_ANSI_H}, {0x24, kVK_ANSI_J}, {0x25, kVK_ANSI_K},
+    {0x26, kVK_ANSI_L},
+    {0x27, kVK_ANSI_Semicolon},      /* JIS: ; +  */
+    {0x28, kVK_ANSI_Quote},          /* JIS: : *  */
+    {0x29, kVK_ANSI_Grave},          /* JIS: Hankaku/Zenkaku */
+    {0x2A, kVK_Shift},
+    {0x2B, kVK_ANSI_Backslash},      /* JIS: ] }  */
+    {0x2C, kVK_ANSI_Z}, {0x2D, kVK_ANSI_X}, {0x2E, kVK_ANSI_C}, {0x2F, kVK_ANSI_V},
+    {0x30, kVK_ANSI_B}, {0x31, kVK_ANSI_N}, {0x32, kVK_ANSI_M},
+    {0x33, kVK_ANSI_Comma}, {0x34, kVK_ANSI_Period}, {0x35, kVK_ANSI_Slash},
+    {0x36, kVK_RightShift},
+    {0x37, kVK_ANSI_KeypadMultiply},
+    {0x38, kVK_Option},
+    {0x39, kVK_Space},
+    {0x3A, kVK_CapsLock},            /* JIS: Eisu / Caps Lock */
+    {0x3B, kVK_F1}, {0x3C, kVK_F2}, {0x3D, kVK_F3}, {0x3E, kVK_F4}, {0x3F, kVK_F5},
+    {0x40, kVK_F6}, {0x41, kVK_F7}, {0x42, kVK_F8}, {0x43, kVK_F9}, {0x44, kVK_F10},
+    /* Num Lock → Clear: the key at that position on Apple keypads (macOS has no
+     * Num Lock; the keypad always types digits). */
+    {0x45, kVK_ANSI_KeypadClear},
+    /* Scroll Lock / Print Screen / Pause → F14 / F13 / F15, the keys at those
+     * positions on Apple extended keyboards (and what macOS does for PC ones). */
+    {0x46, kVK_F14},
+    /* Non-extended 0x47..0x53 are the keypad. The cursor-block keys arrive with
+     * KBDFLAGS_EXTENDED and live in the extended table. */
+    {0x47, kVK_ANSI_Keypad7}, {0x48, kVK_ANSI_Keypad8}, {0x49, kVK_ANSI_Keypad9},
+    {0x4A, kVK_ANSI_KeypadMinus},
+    {0x4B, kVK_ANSI_Keypad4}, {0x4C, kVK_ANSI_Keypad5}, {0x4D, kVK_ANSI_Keypad6},
+    {0x4E, kVK_ANSI_KeypadPlus},
+    {0x4F, kVK_ANSI_Keypad1}, {0x50, kVK_ANSI_Keypad2}, {0x51, kVK_ANSI_Keypad3},
+    {0x52, kVK_ANSI_Keypad0}, {0x53, kVK_ANSI_KeypadDecimal},
+    {0x54, kVK_F13},                 /* SysRq (Alt+Print Screen) */
+    {0x56, kVK_ISO_Section},         /* ISO 102nd key (left of Z) */
+    {0x57, kVK_F11}, {0x58, kVK_F12},
+    {0x59, kVK_ANSI_KeypadEquals},
+    {0x64, kVK_F13}, {0x65, kVK_F14}, {0x66, kVK_F15}, {0x67, kVK_F16},
+    {0x68, kVK_F17}, {0x69, kVK_F18}, {0x6A, kVK_F19}, {0x6B, kVK_F20},
+    /* JIS-specific keys (FreeRDP scancode.h names in parentheses). */
+    {0x70, kVK_JIS_Kana},            /* Katakana/Hiragana (HIRAGANA) */
+    {0x73, kVK_JIS_Underscore},      /* Ro: \ _ (ABNT_C1 / JP OEM_102) */
+    {0x79, kVK_JIS_Kana},            /* Henkan (CONVERT_JP) */
+    {0x7B, kVK_JIS_Eisu},            /* Muhenkan (NONCONVERT_JP) */
+    {0x7D, kVK_JIS_Yen},             /* Yen: ¥ | (BACKSLASH_JP) */
 };
 
-/* Extended scan codes (prefixed 0xE0 in RDP) → macOS VK */
-static const uint16_t kExtScanToVK[256] = {
-    [0x1C] = 76,  /* KP Enter */
-    [0x1D] = 62,  /* RCtrl */
-    [0x35] = 75,  /* KP/ */
-    [0x38] = 61,  /* RAlt */
-    [0x47] = 115, /* Home */
-    [0x48] = 126, /* Up */
-    [0x49] = 116, /* PgUp */
-    [0x4B] = 123, /* Left */
-    [0x4D] = 124, /* Right */
-    [0x4F] = 119, /* End */
-    [0x50] = 125, /* Down */
-    [0x51] = 121, /* PgDn */
-    [0x52] = 114, /* Insert */
-    [0x53] = 117, /* Delete */
-    [0x5B] = 55,  /* LCmd */
-    [0x5C] = 55,  /* RCmd */
+static const ScanMapping kExtScanMappings[] = {
+    {0x1C, kVK_ANSI_KeypadEnter},
+    {0x1D, kVK_RightControl},
+    {0x35, kVK_ANSI_KeypadDivide},
+    {0x36, kVK_RightShift},          /* some clients flag RShift as extended */
+    {0x37, kVK_F13},                 /* Print Screen */
+    {0x38, kVK_RightOption},         /* Right Alt / AltGr */
+    {0x45, kVK_ANSI_KeypadClear},    /* Num Lock sent as extended by some clients */
+    {0x46, kVK_F15},                 /* Ctrl+Break */
+    {0x47, kVK_Home},
+    {0x48, kVK_UpArrow},
+    {0x49, kVK_PageUp},
+    {0x4B, kVK_LeftArrow},
+    {0x4D, kVK_RightArrow},
+    {0x4F, kVK_End},
+    {0x50, kVK_DownArrow},
+    {0x51, kVK_PageDown},
+    {0x52, kVK_Help},                /* Insert — Help sits there on Apple keyboards */
+    {0x53, kVK_ForwardDelete},
+    {0x5B, kVK_Command},             /* Left Windows */
+    {0x5C, kVK_RightCommand},        /* Right Windows */
+    {0x5D, kVK_ContextualMenu},      /* Application / Menu */
 };
+
+static uint16_t gScanToVK[256];
+static uint16_t gExtScanToVK[256];
+
+static void build_tables(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        for (int i = 0; i < 256; i++) gScanToVK[i] = gExtScanToVK[i] = kVKNone;
+        for (size_t i = 0; i < sizeof(kScanMappings) / sizeof(kScanMappings[0]); i++)
+            gScanToVK[kScanMappings[i].scan] = kScanMappings[i].vk;
+        for (size_t i = 0; i < sizeof(kExtScanMappings) / sizeof(kExtScanMappings[0]); i++)
+            gExtScanToVK[kExtScanMappings[i].scan] = kExtScanMappings[i].vk;
+    });
+}
 
 @interface InputInjector ()
 @property (nonatomic, assign) CGDirectDisplayID displayID;
@@ -89,6 +140,7 @@ static const uint16_t kExtScanToVK[256] = {
                       sourceWidth:(uint32_t)sourceWidth
                      sourceHeight:(uint32_t)sourceHeight {
     if ((self = [super init])) {
+        build_tables();
         _displayID = did;
         _srcW = sourceWidth;
         _srcH = sourceHeight;
@@ -104,20 +156,21 @@ static const uint16_t kExtScanToVK[256] = {
     return self;
 }
 
-- (CGKeyCode)keyCodeForScanCode:(uint16_t)code extended:(BOOL)ext {
-    const uint16_t *table = ext ? kExtScanToVK : kScanToVK;
-    if (code >= 256) return 0xFFFF;
-    uint16_t vk = table[code];
-    return (CGKeyCode)vk;
-}
-
-- (void)injectKeyEvent:(uint16_t)flags scanCode:(uint16_t)code {
-    BOOL isRelease = (flags & RDP_KBD_RELEASE) != 0;
+- (void)injectKeyEvent:(uint16_t)flags scanCode:(uint16_t)code16 {
+    BOOL isRelease  = (flags & RDP_KBD_RELEASE) != 0;
     BOOL isExtended = (flags & RDP_KBD_EXTENDED) != 0;
-    CGKeyCode vk = [self keyCodeForScanCode:code extended:isExtended];
-    if (vk == 0xFFFF) return;
+    uint8_t code = (uint8_t)code16;
 
-    CGEventRef event = CGEventCreateKeyboardEvent(NULL, vk, !isRelease);
+    uint16_t vk = isExtended ? gExtScanToVK[code] : gScanToVK[code];
+    if (vk == kVKNone) {
+        rdp_verbose("unmapped scan code %s%02x %s (flags=0x%04x) — ignored",
+                    isExtended ? "E0 " : "", code, isRelease ? "up" : "down", flags);
+        return;
+    }
+    rdp_debug("key scan=%s%02x %s -> vk=%u", isExtended ? "E0 " : "", code,
+              isRelease ? "up" : "down", vk);
+
+    CGEventRef event = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)vk, !isRelease);
     if (!event) return;
 
     /* Post to the session event stream so it reaches the frontmost app. */
