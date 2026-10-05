@@ -66,6 +66,13 @@ if(MACOS_RDP_STATIC)
         z   # zlib — always present on macOS
     )
 else()
+    # Accept a shell-style "a:b" prefix list as well as CMake's "a;b". With ":"
+    # the whole string is treated as one nonexistent prefix, pkg-config falls
+    # back to /opt/homebrew/lib/pkgconfig and resolves versioned Cellar paths
+    # that break (cached) after `brew upgrade`. Via the opt/ prefix they don't.
+    if(CMAKE_HOST_UNIX AND CMAKE_PREFIX_PATH MATCHES ":")
+        string(REPLACE ":" ";" CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
+    endif()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(FREERDP REQUIRED freerdp3)
     pkg_check_modules(WINPR   REQUIRED winpr3)

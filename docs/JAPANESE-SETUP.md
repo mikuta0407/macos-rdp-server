@@ -13,7 +13,7 @@ FreeRDP）・Windows App（iPad / iPhone / Mac）から JIS キーボードで�
 brew install freerdp cmake openssl pkgconf
 git clone <このリポジトリ> && cd macos-rdp-server
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_PREFIX_PATH="$(brew --prefix freerdp):$(brew --prefix openssl)"
+      -DCMAKE_PREFIX_PATH="$(brew --prefix freerdp);$(brew --prefix openssl)"
 cmake --build build
 scripts/install-user.sh build/macos-rdp-daemon
 ```

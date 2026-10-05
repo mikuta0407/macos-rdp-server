@@ -78,7 +78,7 @@ cd macos-rdp-server
 
 # 3. Build
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_PREFIX_PATH="$(brew --prefix freerdp):$(brew --prefix openssl)"
+      -DCMAKE_PREFIX_PATH="$(brew --prefix freerdp);$(brew --prefix openssl)"
 cmake --build build
 
 # 4. Install as a per-user LaunchAgent (no sudo; see the note above)
