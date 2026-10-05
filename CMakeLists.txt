@@ -69,9 +69,15 @@ else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(FREERDP REQUIRED freerdp3)
     pkg_check_modules(WINPR   REQUIRED winpr3)
+    # Server-side channel implementations (rdpgfx/rdpsnd/cliprdr server contexts)
+    # live in libfreerdp-server3 in current FreeRDP 3.x releases.
+    pkg_check_modules(FREERDP_SERVER REQUIRED freerdp-server3)
     set(FREERDP_INCLUDE "${FREERDP_INCLUDE_DIRS}")
     set(WINPR_INCLUDE   "${WINPR_INCLUDE_DIRS}")
-    set(FREERDP_LINK_LIBS ${FREERDP_LIBRARIES} ${WINPR_LIBRARIES})
+    # *_LINK_LIBRARIES are absolute paths; *_LIBRARIES are bare names that only
+    # link when the prefix (e.g. /opt/homebrew/lib) is on the default search path.
+    set(FREERDP_LINK_LIBS ${FREERDP_SERVER_LINK_LIBRARIES} ${FREERDP_LINK_LIBRARIES}
+                          ${WINPR_LINK_LIBRARIES})
 endif()
 
 # ── Target ────────────────────────────────────────────────────────────────
