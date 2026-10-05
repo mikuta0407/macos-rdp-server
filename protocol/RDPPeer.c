@@ -249,6 +249,13 @@ static BOOL peer_keyboard(rdpInput *input, UINT16 flags, UINT8 code) {
     return TRUE;
 }
 
+static BOOL peer_synchronize(rdpInput *input, UINT32 flags) {
+    RDPPeerContext *ctx = (RDPPeerContext *)input->context;
+    if (ctx->callbacks.onSync)
+        ctx->callbacks.onSync(ctx->callbacks.userdata, flags);
+    return TRUE;
+}
+
 static BOOL peer_mouse(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
     RDPPeerContext *ctx = (RDPPeerContext *)input->context;
     if (ctx->callbacks.onMouse)
@@ -883,6 +890,7 @@ freerdp_peer *rdp_peer_create(int fd, const RDPPeerCallbacks *callbacks) {
 
     /* Input is on rdpContext, not on freerdp_peer in 3.x. */
     peer->context->input->KeyboardEvent      = peer_keyboard;
+    peer->context->input->SynchronizeEvent   = peer_synchronize;
     peer->context->input->MouseEvent         = peer_mouse;
     peer->context->input->ExtendedMouseEvent = peer_mouse_ex;
 

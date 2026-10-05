@@ -69,6 +69,7 @@ static const uint32_t kDefaultBitrate = 8000;
     rdp_verbose("creating RDP peer for fd=%d", _fd);
     RDPPeerCallbacks cb = {
         .onKeyboard  = rdp_on_keyboard,
+        .onSync      = rdp_on_sync,
         .onMouse     = rdp_on_mouse,
         .onMouseEx   = rdp_on_mouse_ex,
         .onClipboard = rdp_on_clipboard,
@@ -144,6 +145,11 @@ static void rdp_on_keyboard(void *ud, uint16_t flags, uint16_t code) {
     RDPSession *self = (__bridge RDPSession *)ud;
     rdp_debug("key flags=0x%04x code=0x%02x", flags, code);
     [self.injector injectKeyEvent:flags scanCode:code];
+}
+
+static void rdp_on_sync(void *ud, uint32_t toggleFlags) {
+    RDPSession *self = (__bridge RDPSession *)ud;
+    [self.injector synchronizeWithFlags:toggleFlags];
 }
 
 static void rdp_on_mouse(void *ud, uint16_t flags, uint16_t x, uint16_t y) {
@@ -274,6 +280,12 @@ static void rdp_on_keyframe_request(void *ud) {
     _injector  = [[InputInjector alloc] initWithDisplayID:displayID
                                               sourceWidth:width
                                              sourceHeight:height];
+    {
+        rdpSettings *s = _peer->context->settings;
+        [_injector configureForClientKeyboardLayout:freerdp_settings_get_uint32(s, FreeRDP_KeyboardLayout)
+                                               type:freerdp_settings_get_uint32(s, FreeRDP_KeyboardType)
+                                            subType:freerdp_settings_get_uint32(s, FreeRDP_KeyboardSubType)];
+    }
     _clipboard = [[ClipboardSync alloc] init];
     _clipboard.sendToClientBlock = ^(const uint8_t *data, size_t len, uint32_t fmt) {
         rdp_verbose("sending clipboard to client: format=0x%08x len=%zu", fmt, len);
@@ -352,6 +364,8 @@ static void rdp_on_keyframe_request(void *ud) {
 
 - (void)teardown {
     rdp_verbose("tearing down session for %s", _address.UTF8String);
+    /* Don't leave modifiers stuck down on the Mac if the client vanished mid-chord. */
+    [_injector releaseAllKeys];
     [_cursor stop];
     [_capture stop];
     [_encoder stop];
