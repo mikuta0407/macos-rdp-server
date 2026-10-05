@@ -168,6 +168,13 @@ static void peer_apply_settings(freerdp_peer *peer) {
     freerdp_settings_set_bool(s,   FreeRDP_RdpSecurity,             TRUE);
     freerdp_settings_set_bool(s,   FreeRDP_TlsSecurity,             TRUE);
     freerdp_settings_set_bool(s,   FreeRDP_NlaSecurity,             FALSE);
+    /* HYBRID_EX ("extended" NLA), RDSTLS and AAD are separate switches. Left on,
+     * a client offering SSL|HYBRID|HYBRID_EX (FreeRDP's and mstsc's default) gets
+     * HYBRID_EX selected and then fails CredSSP ("Could not find user in SAM
+     * database"), so the connection never reaches our TLS + PAM logon. */
+    freerdp_settings_set_bool(s,   FreeRDP_ExtSecurity,             FALSE);
+    freerdp_settings_set_bool(s,   FreeRDP_RdstlsSecurity,          FALSE);
+    freerdp_settings_set_bool(s,   FreeRDP_AadSecurity,             FALSE);
     freerdp_settings_set_uint32(s, FreeRDP_TlsSecLevel,             1);
     freerdp_settings_set_uint32(s, FreeRDP_ColorDepth,              32);
     freerdp_settings_set_bool(s,   FreeRDP_UnicodeInput,            TRUE);
