@@ -83,6 +83,10 @@ static const ScanMapping kScanMappings[] = {
     {0x68, kVK_F17}, {0x69, kVK_F18}, {0x6A, kVK_F19}, {0x6B, kVK_F20},
     /* JIS-specific keys (FreeRDP scancode.h names in parentheses). */
     {0x70, kVK_JIS_Kana},            /* Katakana/Hiragana (HIRAGANA) */
+    /* HID LANG1/LANG2 — the Mac's own Kana/Eisu keys, Korean Hangul/Hanja —
+     * which macOS also maps to Kana/Eisu (KANA_HANGUL / HANJA_KANJI). */
+    {0x71, kVK_JIS_Eisu},
+    {0x72, kVK_JIS_Kana},
     {0x73, kVK_JIS_Underscore},      /* Ro: \ _ (ABNT_C1 / JP OEM_102) */
     {0x79, kVK_JIS_Kana},            /* Henkan (CONVERT_JP) */
     {0x7B, kVK_JIS_Eisu},            /* Muhenkan (NONCONVERT_JP) */
@@ -290,6 +294,8 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     BOOL _isoSwap;                 /* swap Grave/Section like macOS does for ISO */
     BOOL _zenkakuToggle;           /* JIS 0x29 toggles Kana/Eisu */
     BOOL _swapCtrlCmd;
+    BOOL _learnJIS;                /* layout unknown: switch to JIS on a JIS-only key */
+    BOOL _warnedScanZero;
     BOOL _capsLock;
     BOOL _pausePending;            /* swallow the 0x45 that follows E1 1D */
     BOOL _keyDown[128];            /* Mac keycodes currently held */
@@ -353,6 +359,15 @@ static BOOL env_flag(const char *name, BOOL dflt) {
         else { rdp_error("RDP_KEYBOARD_TYPE='%s' not understood — using detection", env);
                how = "detected"; }
     }
+    /* Some clients (Windows App for Mac) announce no layout at all. Then wait
+     * for a key that only exists on JIS keyboards before deciding. */
+    _learnJIS = (kbType == 0 && strcmp(how, "detected") == 0);
+    rdp_info("client keyboard: layout=0x%08x type=%u subtype=%u%s", layout, type, subType,
+             _learnJIS ? " (layout not announced — switching to JIS if a JIS-only key arrives)" : "");
+    [self applyKeyboardType:kbType how:how];
+}
+
+- (void)applyKeyboardType:(uint32_t)kbType how:(const char *)how {
     _keyboardType = kbType;
     if (kbType && _source) CGEventSourceSetKeyboardType(_source, kbType);
 
@@ -360,8 +375,7 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     _isoSwap = kbType && family == KB_FAMILY_ISO;
     _zenkakuToggle = kbType && family == KB_FAMILY_JIS && env_flag("RDP_ZENKAKU_TOGGLE", YES);
 
-    rdp_info("client keyboard: layout=0x%08x type=%u subtype=%u → Mac keyboard type %u "
-             "(%s, %s)%s%s", layout, type, subType, kbType, keyboard_type_name(kbType), how,
+    rdp_info("→ Mac keyboard type %u (%s, %s)%s%s", kbType, keyboard_type_name(kbType), how,
              _zenkakuToggle ? ", Hankaku/Zenkaku toggles Kana/Eisu" : "",
              _swapCtrlCmd ? ", Ctrl<->Cmd swapped" : "");
 }
@@ -390,6 +404,12 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     } else {
         _keyDown[vk] = down;
     }
+
+    /* Keep the cached input mode in step with Kana/Eisu we send ourselves:
+     * Windows App sends Eisu as Hiragana (0x70) immediately followed by
+     * Hankaku/Zenkaku (0x29), long before the change notification arrives. */
+    if (down && vk == kVK_JIS_Kana) atomic_store(&gAsciiCapable, 0);
+    if (down && vk == kVK_JIS_Eisu) atomic_store(&gAsciiCapable, 1);
 
     CGEventRef ev = CGEventCreateKeyboardEvent(_source, (CGKeyCode)vk, down);
     if (!ev) return;
@@ -460,15 +480,18 @@ static BOOL env_flag(const char *name, BOOL dflt) {
         }
     }
 
+    if (_learnJIS && !isExtended &&
+        (code == 0x70 || code == 0x73 || code == 0x79 || code == 0x7B || code == 0x7D)) {
+        _learnJIS = NO;
+        [self applyKeyboardType:RDP_MAC_KBTYPE_JIS how:"learned from a JIS-only key"];
+    }
+
     /* JIS Hankaku/Zenkaku is a toggle on Windows; a Mac has separate Eisu and
      * Kana keys instead, so pick whichever switches away from the current mode. */
     if (_zenkakuToggle && !isExtended && code == 0x29) {
         if (isRelease) return;
         int ascii = atomic_load(&gAsciiCapable);
         uint16_t vk = (ascii == 0) ? kVK_JIS_Eisu : kVK_JIS_Kana;
-        /* Optimistically flip the cache so a quick second press toggles back
-         * even before the change notification arrives. */
-        atomic_store(&gAsciiCapable, ascii == 0 ? 1 : 0);
         rdp_debug("key scan=0x29 (Hankaku/Zenkaku) -> vk=%u (%s)", vk,
                   vk == kVK_JIS_Kana ? "Kana" : "Eisu");
         [self tapKey:vk];
@@ -477,6 +500,11 @@ static BOOL env_flag(const char *name, BOOL dflt) {
 
     uint16_t vk = isExtended ? gExtScanToVK[code] : gScanToVK[code];
     if (vk == kVKNone) {
+        if (code == 0 && !isExtended && !_warnedScanZero) {
+            _warnedScanZero = YES;
+            rdp_info("client sent scan code 0 — it could not translate that key (e.g. "
+                     "sdl-freerdp sends 0 for the Mac's Eisu/Kana and JIS Yen/Ro keys); ignored");
+        }
         rdp_verbose("unmapped scan code %s%02x %s (flags=0x%04x) — ignored",
                     isExtended ? "E0 " : "", code, isRelease ? "up" : "down", flags);
         return;
