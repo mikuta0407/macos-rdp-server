@@ -8,9 +8,9 @@
 /*
  * HEADLESS CURSOR CAPTURE (read before changing the timer or read path)
  * ---------------------------------------------------------------------
- * This daemon has NO running main run loop: the main thread blocks forever in
- * kevent() (see daemon/main.m), and there is no NSApplication. So:
- *   - We CANNOT drive an NSTimer on the main run loop (it would never fire).
+ * This daemon's main run loop is reserved for signal handling and input-source
+ * notifications (see daemon/main.m), and there is no NSApplication. So:
+ *   - We do NOT drive an NSTimer on the main run loop.
  *     Instead we run a dispatch_source timer on a dedicated background serial
  *     queue, mirroring how DisplayControl.m drives work off the main thread.
  *   - We CANNOT rely on NSCursor.currentSystemCursor: it is AppKit/main-thread-

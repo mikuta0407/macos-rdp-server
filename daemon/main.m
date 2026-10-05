@@ -4,11 +4,11 @@
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #import <syslog.h>
 #import <signal.h>
-#import <sys/event.h>
 #import <unistd.h>
 #import "daemon/RDPServer.h"
 #import "daemon/RDPSession.h"
 #import "daemon/AutoUpdate.h"
+#import "input/InputInjector.h"
 #define RDP_LOG_COMPONENT "main"
 #include "logging/RDPLog.h"
 
@@ -85,20 +85,11 @@ int main(int argc, char *argv[]) {
                  MACOS_RDP_VERSION, MACOS_RDP_BUILD_VERSION,
                  (const char *[]){"error","info","verbose","debug"}[rdp_log_get_level()]);
 
-        /* Block SIGTERM/SIGINT at the signal level; catch via kqueue instead.
-           This gives us a clean shutdown path with zero polling overhead. */
+        /* SIGTERM/SIGINT are delivered as dispatch sources on the main queue
+           (default dispositions ignored), which the main run loop below services. */
         signal(SIGPIPE, SIG_IGN);
-        sigset_t mask;
-        sigemptyset(&mask);
-        sigaddset(&mask, SIGTERM);
-        sigaddset(&mask, SIGINT);
-        sigprocmask(SIG_BLOCK, &mask, NULL);
-
-        int kq = kqueue();
-        struct kevent kev[2];
-        EV_SET(&kev[0], SIGTERM, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
-        EV_SET(&kev[1], SIGINT,  EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
-        kevent(kq, kev, 2, NULL, 0, NULL);
+        signal(SIGTERM, SIG_IGN);
+        signal(SIGINT,  SIG_IGN);
 
         AppDelegate *delegate = [[AppDelegate alloc] init];
         RDPServer *server = [[RDPServer alloc] initWithPort:port];
@@ -137,26 +128,36 @@ int main(int argc, char *argv[]) {
 
         /* Start the silent self-updater (no-op if RDP_UPDATE_ENABLED=0). It
          * runs entirely on its own background serial queue + dispatch timer —
-         * it never touches the main thread (which is about to park in kevent). */
+         * it never touches the main thread. */
         [AutoUpdate start];
 
-        /* Spin the run loop on a background thread so CFRunLoop/dispatch works,
-           while this thread blocks on kqueue — zero CPU until a signal arrives. */
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            [[NSRunLoop currentRunLoop] run];
-        });
+        /* Track the Mac's current input source for the JIS Hankaku/Zenkaku key.
+           Text Input Sources must be used on the main thread, so it is set up
+           here and kept current by notifications delivered to the main run loop. */
+        [InputInjector startInputSourceMonitor];
 
-        struct kevent got;
-        while (1) {
-            int n = kevent(kq, NULL, 0, &got, 1, NULL); /* blocks until signal */
-            if (n > 0 && (got.ident == SIGTERM || got.ident == SIGINT)) break;
+        const IOPMAssertionID wakeAssertion = daemonWakeAssertion;
+        void (^shutdown)(void) = ^{
+            rdp_info("shutting down");
+            if (wakeAssertion != kIOPMNullAssertionID)
+                IOPMAssertionRelease(wakeAssertion);
+            [server stop];
+            closelog();
+            exit(0);
+        };
+        dispatch_source_t sigs[2];
+        int signums[2] = { SIGTERM, SIGINT };
+        for (int i = 0; i < 2; i++) {
+            sigs[i] = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, (uintptr_t)signums[i],
+                                             0, dispatch_get_main_queue());
+            dispatch_source_set_event_handler(sigs[i], shutdown);
+            dispatch_resume(sigs[i]);
         }
-        close(kq);
 
-        rdp_info("shutting down");
-        if (daemonWakeAssertion != kIOPMNullAssertionID)
-            IOPMAssertionRelease(daemonWakeAssertion);
-        [server stop];
+        /* The main thread runs its run loop for the daemon's lifetime: it services
+           the signal sources above and Text Input Source notifications. Zero CPU
+           while idle. */
+        CFRunLoopRun();
         closelog();
         return 0;
     }

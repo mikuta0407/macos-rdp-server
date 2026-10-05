@@ -5,6 +5,7 @@
 #import <IOKit/hidsystem/IOLLEvent.h>
 #import <IOKit/hidsystem/ev_keymap.h>
 #import <dlfcn.h>
+#import <stdatomic.h>
 #import <syslog.h>
 #define RDP_LOG_COMPONENT "input"
 #include "logging/RDPLog.h"
@@ -47,7 +48,7 @@ static const ScanMapping kScanMappings[] = {
     {0x26, kVK_ANSI_L},
     {0x27, kVK_ANSI_Semicolon},      /* JIS: ; +  */
     {0x28, kVK_ANSI_Quote},          /* JIS: : *  */
-    {0x29, kVK_ANSI_Grave},          /* JIS: Hankaku/Zenkaku */
+    {0x29, kVK_ANSI_Grave},          /* JIS: Hankaku/Zenkaku (see zenkakuToggle) */
     {0x2A, kVK_Shift},
     {0x2B, kVK_ANSI_Backslash},      /* JIS: ] }  */
     {0x2C, kVK_ANSI_Z}, {0x2D, kVK_ANSI_X}, {0x2E, kVK_ANSI_C}, {0x2F, kVK_ANSI_V},
@@ -192,6 +193,32 @@ static CGEventFlags extra_flags_for_vk(uint16_t vk) {
     }
 }
 
+/* ── Input source tracking (JIS Hankaku/Zenkaku toggle) ──────────────────
+ * Text Input Sources APIs must run on the main thread, while key events arrive
+ * on the session queue. So the main thread caches "is the current input source
+ * ASCII-capable" (ABC / Japanese alphanumeric: yes, Hiragana etc.: no) and
+ * refreshes it on every input-source change. -1 = unknown. */
+
+static _Atomic int gAsciiCapable = -1;
+
+static void refresh_ascii_capable(void) {
+    TISInputSourceRef src = TISCopyCurrentKeyboardInputSource();
+    if (!src) return;
+    CFBooleanRef ascii = TISGetInputSourceProperty(src, kTISPropertyInputSourceIsASCIICapable);
+    CFStringRef sid = TISGetInputSourceProperty(src, kTISPropertyInputSourceID);
+    int value = (ascii && CFBooleanGetValue(ascii)) ? 1 : 0;
+    atomic_store(&gAsciiCapable, value);
+    rdp_debug("input source: %s (ascii-capable=%d)",
+              sid ? [(__bridge NSString *)sid UTF8String] : "?", value);
+    CFRelease(src);
+}
+
+static void input_source_changed(CFNotificationCenterRef center, void *observer,
+                                 CFNotificationName name, const void *object,
+                                 CFDictionaryRef userInfo) {
+    refresh_ascii_capable();
+}
+
 /* ── Keyboard type selection ─────────────────────────────────────────────── */
 
 static uint32_t keyboard_type_for_client(uint32_t layout, uint32_t type) {
@@ -261,11 +288,20 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     CGEventSourceRef _source;
     uint32_t _keyboardType;        /* 0 = leave the system default */
     BOOL _isoSwap;                 /* swap Grave/Section like macOS does for ISO */
+    BOOL _zenkakuToggle;           /* JIS 0x29 toggles Kana/Eisu */
     BOOL _swapCtrlCmd;
     BOOL _capsLock;
     BOOL _pausePending;            /* swallow the 0x45 that follows E1 1D */
     BOOL _keyDown[128];            /* Mac keycodes currently held */
     uint16_t _pendingHighSurrogate;
+}
+
++ (void)startInputSourceMonitor {
+    refresh_ascii_capable();
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDistributedCenter(), NULL,
+                                    input_source_changed,
+                                    kTISNotifySelectedKeyboardInputSourceChanged, NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
 }
 
 - (instancetype)initWithDisplayID:(CGDirectDisplayID)did
@@ -317,9 +353,11 @@ static BOOL env_flag(const char *name, BOOL dflt) {
 
     KeyboardFamily family = kbType ? keyboard_family(kbType) : KB_FAMILY_ANSI;
     _isoSwap = kbType && family == KB_FAMILY_ISO;
+    _zenkakuToggle = kbType && family == KB_FAMILY_JIS && env_flag("RDP_ZENKAKU_TOGGLE", YES);
 
     rdp_info("client keyboard: layout=0x%08x type=%u subtype=%u → Mac keyboard type %u "
-             "(%s, %s)%s", layout, type, subType, kbType, keyboard_type_name(kbType), how,
+             "(%s, %s)%s%s", layout, type, subType, kbType, keyboard_type_name(kbType), how,
+             _zenkakuToggle ? ", Hankaku/Zenkaku toggles Kana/Eisu" : "",
              _swapCtrlCmd ? ", Ctrl<->Cmd swapped" : "");
 }
 
@@ -361,6 +399,11 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     /* Post to the session event stream so it reaches the frontmost app. */
     CGEventPost(kCGSessionEventTap, ev);
     CFRelease(ev);
+}
+
+- (void)tapKey:(uint16_t)vk {
+    [self postKey:vk down:YES];
+    [self postKey:vk down:NO];
 }
 
 - (void)postMediaKey:(int)nxKey down:(BOOL)down {
@@ -410,6 +453,21 @@ static BOOL env_flag(const char *name, BOOL dflt) {
             [self postMediaKey:nx down:!isRelease];
             return;
         }
+    }
+
+    /* JIS Hankaku/Zenkaku is a toggle on Windows; a Mac has separate Eisu and
+     * Kana keys instead, so pick whichever switches away from the current mode. */
+    if (_zenkakuToggle && !isExtended && code == 0x29) {
+        if (isRelease) return;
+        int ascii = atomic_load(&gAsciiCapable);
+        uint16_t vk = (ascii == 0) ? kVK_JIS_Eisu : kVK_JIS_Kana;
+        /* Optimistically flip the cache so a quick second press toggles back
+         * even before the change notification arrives. */
+        atomic_store(&gAsciiCapable, ascii == 0 ? 1 : 0);
+        rdp_debug("key scan=0x29 (Hankaku/Zenkaku) -> vk=%u (%s)", vk,
+                  vk == kVK_JIS_Kana ? "Kana" : "Eisu");
+        [self tapKey:vk];
+        return;
     }
 
     uint16_t vk = isExtended ? gExtScanToVK[code] : gScanToVK[code];

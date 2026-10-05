@@ -388,17 +388,16 @@ static void rdp_on_keyframe_request(void *ud) {
 
     /* Signal anyone waiting on takeover that our display is now released. Done
      * here (on the session queue, after destroy) rather than via the main-queue
-     * delegate hop below — the main run loop does not run in this daemon, so the
-     * semaphore is the reliable cross-thread completion signal. */
+     * delegate hop below, so the semaphore is the reliable cross-thread
+     * completion signal. */
     dispatch_semaphore_signal(_teardownSem);
 
     [self endWithError:nil];
 }
 
 - (void)endWithError:(NSError *)error {
-    /* Notify on a background queue, NOT the main queue: this daemon's main thread
-     * blocks in kevent() with no running main run loop, so a main-queue async
-     * would never fire and the server would never remove this session. */
+    /* Notify on a background queue, NOT the main queue: the main run loop is
+     * kept for signal handling and input-source notifications (daemon/main.m). */
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         [self.delegate sessionDidEnd:self error:error];
     });

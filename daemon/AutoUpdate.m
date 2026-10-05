@@ -11,8 +11,8 @@
 /*
  * SILENT AUTO-UPDATER — design notes
  * ----------------------------------------------------------------------------
- * THREADING: the daemon's main thread is permanently parked in kevent() (see
- * daemon/main.m), so there is no running main run loop. We therefore drive the
+ * THREADING: the daemon's main run loop exists only for signal handling and
+ * input-source notifications (see daemon/main.m). We therefore drive the
  * periodic check from a dispatch_source TIMER on a private background SERIAL
  * queue (same pattern as display/ScreenCapture.m). All work — networking,
  * codesign, file IO, restart — happens on that queue; never on the main queue,

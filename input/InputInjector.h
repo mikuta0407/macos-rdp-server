@@ -64,6 +64,11 @@ NS_ASSUME_NONNULL_BEGIN
 /* Wheel rotation is encoded entirely within flags; decoded internally. */
 - (void)injectMouseWheelEvent:(uint16_t)flags x:(uint16_t)x y:(uint16_t)y;
 
+/* Start tracking whether the Mac's current input source is ASCII-capable (used
+ * by the JIS Hankaku/Zenkaku toggle). Text Input Sources must be queried on the
+ * main thread, so call this once from the main thread before its run loop runs. */
++ (void)startInputSourceMonitor;
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -9,10 +9,9 @@
 /*
  * RUN-LOOP / THREADING NOTE (important — read before changing blanking strategy)
  * ----------------------------------------------------------------------------
- * The daemon's MAIN thread blocks in kevent() for its whole life (see
- * daemon/main.m); the only running run loop is a CFRunLoop spun on a background
- * dispatch global queue. There is therefore NO running main run loop and no
- * NSApplication event loop.
+ * The daemon's MAIN thread runs a CFRunLoop used only for signal handling and
+ * input-source notifications (see daemon/main.m); there is no NSApplication
+ * event loop.
  *
  * BLANKING STRATEGY — panel brightness, NOT display capture
  * ----------------------------------------------------------------------------
