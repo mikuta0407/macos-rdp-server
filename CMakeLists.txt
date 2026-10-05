@@ -124,6 +124,7 @@ target_link_libraries(macos-rdp-daemon PRIVATE
     "-framework AudioToolbox"
     "-framework AppKit"
     "-framework ApplicationServices"
+    "-framework Carbon"   # Text Input Sources (JIS Hankaku/Zenkaku toggle)
     "-framework OpenDirectory"
     "-framework IOKit"
     "-framework IOSurface"
