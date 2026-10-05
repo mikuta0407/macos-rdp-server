@@ -139,13 +139,25 @@ xfreerdp3 /v:100.x.y.z /u:USER /cert:tofu /sec:tls /gfx /sound /kbd:layout:0x411
 # Mac では sdl-freerdp でも同じオプション
 ```
 
-### Windows App（iPad / iPhone / Mac）⚠️ 未確認
+**Mac の sdl-freerdp の制限**（FreeRDP 3.31 の `client/SDL/SDL3/sdl_input.cpp` で確認）:
+SDL の `LANG1`/`LANG2`（Mac の かな/英数）と `INTERNATIONAL1`/`INTERNATIONAL3`（ろ・¥）が
+`RDP_SCANCODE_UNKNOWN` に割り当てられているため、これらのキーはすべてスキャンコード 0 として
+送られ、サーバー側ではどのキーか区別できません（ログに `client sent scan code 0` と出ます）。
+Mac から使うなら Windows App を推奨します。sdl-freerdp を直すにはクライアント側の修正が必要です
+（サーバーは LANG1/LANG2 相当の 0x72/0x71 を かな/英数 として受け付けます）。
+
+### Windows App（iPad / iPhone / Mac）
 
 - 「PC を追加」→ PC 名 = Tailscale IP、ユーザーアカウントを追加
+- Mac 版はキーボードレイアウトを通知しません（`layout=0x00000000`）。このためサーバーは最初は
+  判定を保留し、JIS にしかないキー（かな・英数・¥・ろ など）が届いた時点で JIS に切り替えます。
+  それまでに打った記号は US 配列扱いになるので、**クライアントが全部 JIS なら Mac 側で
+  `RDP_KEYBOARD_TYPE=jis` を指定するのがおすすめ**です（`install-user.sh` を再実行）。
+- Mac 版のキー送信（実機ログで確認 ✅）: 記号はキー位置のスキャンコード、かな = 0x70、
+  英数 = 0x70 の直後に 0x29。サーバーはこの組み合わせを「かな → 半角/全角 → 英数」として処理し、
+  最終的に英数になります ✅。
 - ソフトウェアキーボードの文字は Unicode イベントで届くため、そのまま入力されます
-  （Unicode 入力自体は FreeRDP で確認済み ✅）。
-- 外付けの JIS キーボードで記号がずれる場合は、Mac 側で `RDP_KEYBOARD_TYPE=jis` を指定して
-  `install-user.sh` を再実行してください（クライアントが US 配列を通知している可能性があります）。
+  （Unicode 入力自体は FreeRDP で確認済み ✅）。iPad/iPhone 版は ⚠️ 未確認。
 
 ---
 
@@ -156,6 +168,7 @@ xfreerdp3 /v:100.x.y.z /u:USER /cert:tofu /sec:tls /gfx /sound /kbd:layout:0x411
 | 変換 | 0x79 | かな（kVK_JIS_Kana = 104） | ✅ |
 | 無変換 | 0x7B | 英数（kVK_JIS_Eisu = 102） | ✅ |
 | カタカナ/ひらがな | 0x70 | かな（104） | ✅ |
+| （HID LANG1 / LANG2） | 0x72 / 0x71 | かな / 英数 | Mac・韓国語キーボード由来 |
 | 半角/全角 | 0x29 | 現在の入力モードを見て かな ⇄ 英数 を切り替え | ✅ `RDP_ZENKAKU_TOGGLE=0` で無効 |
 | ¥ | 0x7D | kVK_JIS_Yen = 93 | ✅ `¥` / ⇧`\|` |
 | ろ（\ _） | 0x73 | kVK_JIS_Underscore = 94 | ✅ `_` |
@@ -233,7 +246,8 @@ cat /tmp/keylog-text.txt                # → x@[]:;^¥_x
 |---|---|
 | 画面が真っ黒 | 画面収録の権限。LaunchDaemon（システム全体）ではなく LaunchAgent で動いているか |
 | キー・マウスが効かない | アクセシビリティの権限。ログに `Accessibility not granted` |
-| 記号がずれる | ログの `client keyboard:` 行。違っていれば `RDP_KEYBOARD_TYPE=jis` |
+| 記号がずれる | ログの `client keyboard:` と `→ Mac keyboard type` 行。違っていれば `RDP_KEYBOARD_TYPE=jis` |
+| 英数/かな・¥・ろ が効かない | ログに `client sent scan code 0` → クライアント（sdl-freerdp など）がキーを変換できていない |
 | 修飾キーが押しっぱなしになる | クライアントにフォーカスを戻すと同期イベントで解放されます。切断時も解放 |
 | 再起動後に繋がらない | GUI ログインしているか（§2） |
 | 接続直後に切れる（FreeRDP） | `/sec:tls` を指定。サーバーは NLA を使いません |

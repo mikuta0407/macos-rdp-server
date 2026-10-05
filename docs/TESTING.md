@@ -157,7 +157,7 @@ server's GUI session, then drive it with `rdp-keytest` (see the header of
 | `RDP_RDPDR_ENABLED` | 1 | Enable Windows drive redirection |
 | `RDP_AUDIO_LOCAL` | 1 | Also play audio on local Mac speakers |
 | `RDP_AUDIO_INPUT` | 0 | Receive Windows mic → Mac speakers (MS-RDPEAI) |
-| `RDP_KEYBOARD_TYPE` | auto | Mac keyboard type for injected keys: `auto` (from the client's layout/type), `jis`, `ansi`, `iso`, or a number |
+| `RDP_KEYBOARD_TYPE` | auto | Mac keyboard type for injected keys: `auto` (from the client's layout/type; if the client announces no layout, JIS is chosen on the first JIS-only key), `jis`, `ansi`, `iso`, or a number |
 | `RDP_ZENKAKU_TOGGLE` | 1 | JIS clients: Hankaku/Zenkaku switches Kana ⇄ Eisu (0 = send it as the ` key) |
 | `RDP_SWAP_CTRL_CMD` | 0 | Swap Ctrl and Cmd (Windows-style ⌃C/⌃V) |
 | `RDP_ALLOW_IDLE_SLEEP` | 0 | Allow Mac to idle-sleep (breaks remote access) |
