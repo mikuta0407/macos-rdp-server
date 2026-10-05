@@ -15,7 +15,7 @@ BUILD="$REPO/build"
 echo "==> Building daemon..."
 cmake -B "$BUILD" -S "$REPO" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_PREFIX_PATH="$(brew --prefix freerdp3):$(brew --prefix openssl)"
+    -DCMAKE_PREFIX_PATH="$(brew --prefix freerdp3);$(brew --prefix openssl)"
 cmake --build "$BUILD" --parallel "$(sysctl -n hw.logicalcpu)"
 
 echo "==> Installing binary..."
