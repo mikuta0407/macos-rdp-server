@@ -17,6 +17,18 @@
 #   scripts/install-user.sh [path-to-macos-rdp-daemon]
 #     If no path is given, falls back to ./build/macos-rdp-daemon.
 #
+# Settings written into the LaunchAgent (set them in the environment when running
+# this script; re-run the script to change them):
+#   RDP_PORT              listen port                                  (3389)
+#   RDP_LOG_LEVEL         error|info|verbose|debug                     (info)
+#   RDP_UPDATE_ENABLED    1 = self-update from GitHub releases         (0)
+#                         Off by default here: the updater replaces the binary
+#                         with the upstream release build, discarding a local build.
+#   RDP_KEYBOARD_TYPE, RDP_ZENKAKU_TOGGLE, RDP_SWAP_CTRL_CMD, RDP_AUDIO_LOCAL,
+#   RDP_AUDIO_INPUT, RDP_RDPDR_ENABLED, RDP_CURSOR_SHAPES, RDP_SHARED_MODE,
+#   RDP_PRIVACY_BLANK, RDP_ALLOW_IDLE_SLEEP
+#                         passed through only when set (see docs/TESTING.md)
+#
 # NOTE: This codifies the exact sequence validated manually over SSH. Verify end-to-end
 # on a real Mac after any change.
 
@@ -28,6 +40,11 @@ if [[ $EUID -eq 0 ]]; then
 fi
 
 PORT="${RDP_PORT:-3389}"
+LOG_LEVEL="${RDP_LOG_LEVEL:-info}"
+UPDATE_ENABLED="${RDP_UPDATE_ENABLED:-0}"
+PASSTHROUGH_VARS=(RDP_KEYBOARD_TYPE RDP_ZENKAKU_TOGGLE RDP_SWAP_CTRL_CMD RDP_AUDIO_LOCAL
+                  RDP_AUDIO_INPUT RDP_RDPDR_ENABLED RDP_CURSOR_SHAPES RDP_SHARED_MODE
+                  RDP_PRIVACY_BLANK RDP_ALLOW_IDLE_SLEEP)
 ROOT="$HOME/.macos-rdp"
 BIN_DIR="$ROOT/bin"
 SIGN_DIR="$ROOT/signing"
@@ -73,17 +90,28 @@ CNF
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
         -keyout "$SIGN_DIR/key.pem" -out "$SIGN_DIR/cert.pem" \
         -config "$SIGN_DIR/openssl.cnf"
-    openssl pkcs12 -export -name "$CN" \
-        -inkey "$SIGN_DIR/key.pem" -in "$SIGN_DIR/cert.pem" \
-        -out "$SIGN_DIR/cert.p12" -passout "pass:$P12PASS"
 fi
+# Explicit SHA1/3DES PBE + SHA1 MAC: OpenSSL 3 (e.g. Homebrew's, often first on
+# PATH) defaults to AES/PBKDF2 with a SHA-256 MAC, which `security import`
+# rejects ("MAC verification failed"). LibreSSL (/usr/bin/openssl) accepts these too.
+openssl pkcs12 -export -name "$CN" \
+    -inkey "$SIGN_DIR/key.pem" -in "$SIGN_DIR/cert.pem" \
+    -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
+    -out "$SIGN_DIR/cert.p12" -passout "pass:$P12PASS"
 
 # 3. Keychain holding the signing identity (idempotent, unlocked, no auto-lock) ---------
 security delete-keychain "$KC" 2>/dev/null || true
 security create-keychain -p "$KCPASS" "$KC"
 security set-keychain-settings "$KC"
 security unlock-keychain -p "$KCPASS" "$KC"
-security list-keychains -d user -s "$KC" "$HOME/Library/Keychains/login.keychain-db"
+# Add the signing keychain to the user's search list, keeping whatever is there.
+EXISTING_KCS=()
+while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%\"}"; line="${line#\"}"
+    [[ -n "$line" && "$line" != "$KC" ]] && EXISTING_KCS+=("$line")
+done < <(security list-keychains -d user)
+[[ ${#EXISTING_KCS[@]} -eq 0 ]] && EXISTING_KCS=("$HOME/Library/Keychains/login.keychain-db")
+security list-keychains -d user -s "${EXISTING_KCS[@]}" "$KC"
 security import "$SIGN_DIR/cert.p12" -k "$KC" -P "$P12PASS" -T /usr/bin/codesign -A
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPASS" "$KC" >/dev/null 2>&1 || true
 
@@ -110,6 +138,12 @@ fi
 
 # 6. Per-user LaunchAgent (Aqua session => WindowServer => capture works) ---------------
 echo "==> Writing LaunchAgent..."
+EXTRA_ENV=""
+for v in "${PASSTHROUGH_VARS[@]}"; do
+    if [[ -n "${!v:-}" ]]; then
+        EXTRA_ENV+="        <key>$v</key><string>${!v}</string>"$'\n'
+    fi
+done
 cat > "$PLIST" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -123,8 +157,9 @@ cat > "$PLIST" <<PL
     <key>EnvironmentVariables</key>
     <dict>
         <key>RDP_CERT_DIR</key><string>$ROOT</string>
-        <key>RDP_LOG_LEVEL</key><string>info</string>
-    </dict>
+        <key>RDP_LOG_LEVEL</key><string>$LOG_LEVEL</string>
+        <key>RDP_UPDATE_ENABLED</key><string>$UPDATE_ENABLED</string>
+${EXTRA_ENV}    </dict>
     <key>StandardOutPath</key><string>$HOME/Library/Logs/macos-rdp-agent.log</string>
     <key>StandardErrorPath</key><string>$HOME/Library/Logs/macos-rdp-agent.error.log</string>
     <key>ThrottleInterval</key><integer>5</integer>
@@ -142,6 +177,9 @@ launchctl bootstrap "$GUI" "$PLIST"
 cat <<EOF
 
 Installed and running as $LABEL on port $PORT (user: $USER).
+  binary:  $BIN
+  plist:   $PLIST
+  logs:    $HOME/Library/Logs/macos-rdp-agent.log, macos-rdp-agent.error.log
 
 ONE-TIME permission grant (durable afterwards — survives rebuilds):
   1. Connect once from your RDP client to this Mac.
