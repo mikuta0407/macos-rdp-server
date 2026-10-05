@@ -10,6 +10,7 @@
 #import "input/ClipboardSync.h"
 #import "audio/AudioCapture.h"
 #import "audio/AudioRedirect.h"
+#import <os/lock.h>
 #import <unistd.h>
 #include <freerdp/freerdp.h>
 #define RDP_LOG_COMPONENT "session"
@@ -18,6 +19,18 @@
 static const uint32_t kDefaultWidth   = 1920;
 static const uint32_t kDefaultHeight  = 1080;
 static const uint32_t kDefaultBitrate = 8000;
+
+/* Hand-off point between the audio capture thread and the peer. Audio starts
+ * asynchronously (see setupDisplayAndMediaForWidth:), so the capture callback can
+ * outlive the peer; teardown detaches the peer here before destroying it. */
+@interface RDPAudioSink : NSObject {
+@public
+    os_unfair_lock lock;
+    freerdp_peer *peer;
+}
+@end
+@implementation RDPAudioSink
+@end
 
 @interface RDPSession ()
 @property (nonatomic, assign) int fd;
@@ -31,6 +44,12 @@ static const uint32_t kDefaultBitrate = 8000;
 @property (nonatomic, strong) InputInjector   *injector;
 @property (nonatomic, strong) ClipboardSync   *clipboard;
 @property (nonatomic, strong) AudioCapture    *audio;
+@property (nonatomic, strong) RDPAudioSink    *audioSink;
+/* Audio start/stop run here, off the session queue: the first start can block
+ * in AudioDeviceStart until the "record system audio" consent prompt is
+ * answered — and on a headless Mac that prompt can only be answered through
+ * this very session, so it must not stall the peer loop. */
+@property (nonatomic, strong) dispatch_queue_t audioQueue;
 @property (nonatomic, strong) CursorCapture   *cursor;
 @property (nonatomic, strong) dispatch_queue_t sessionQueue;
 /* Signaled exactly once when teardown completes; lets the takeover path wait
@@ -52,6 +71,8 @@ static const uint32_t kDefaultBitrate = 8000;
         _sessionQueue   = dispatch_queue_create("com.macosrdp.session",
                                                 DISPATCH_QUEUE_SERIAL);
         _teardownSem    = dispatch_semaphore_create(0);
+        _audioQueue     = dispatch_queue_create("com.macosrdp.session.audio",
+                                                DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
@@ -304,19 +325,27 @@ static void rdp_on_keyframe_request(void *ud) {
     BOOL clientWantsAudio = freerdp_settings_get_bool(
         _peer->context->settings, FreeRDP_AudioPlayback);
     if (clientWantsAudio) {
+        RDPAudioSink *sink = [RDPAudioSink new];
+        sink->lock = OS_UNFAIR_LOCK_INIT;
+        sink->peer = _peer;
+        _audioSink = sink;
         _audio = [[AudioCapture alloc] init];
         _audio.captureBlock = ^(const int16_t *samples, uint32_t frameCount) {
             /* No per-buffer logging here: buffers arrive ~100x/sec and flooded the
              * log. AudioCapture itself logs a throttled frame total. */
-            rdp_peer_send_audio(weak.peer, samples, frameCount);
+            os_unfair_lock_lock(&sink->lock);
+            if (sink->peer) rdp_peer_send_audio(sink->peer, samples, frameCount);
+            os_unfair_lock_unlock(&sink->lock);
         };
-        NSError *audioErr = nil;
-        if (![_audio startWithError:&audioErr]) {
-            rdp_verbose("audio capture unavailable: %s",
-                        audioErr.localizedDescription.UTF8String);
-        } else {
-            rdp_verbose("audio capture started");
-        }
+        AudioCapture *audio = _audio;
+        dispatch_async(_audioQueue, ^{
+            NSError *audioErr = nil;
+            if (![audio startWithError:&audioErr])
+                rdp_verbose("audio capture unavailable: %s",
+                            audioErr.localizedDescription.UTF8String);
+            else
+                rdp_verbose("audio capture started");
+        });
     } else {
         rdp_verbose("client did not request audio — capture skipped");
     }
@@ -375,7 +404,16 @@ static void rdp_on_keyframe_request(void *ud) {
     [_cursor stop];
     [_capture stop];
     [_encoder stop];
-    [_audio stop];
+    if (_audioSink) {
+        os_unfair_lock_lock(&_audioSink->lock);
+        _audioSink->peer = NULL;           /* no more sends into the dying peer */
+        os_unfair_lock_unlock(&_audioSink->lock);
+    }
+    if (_audio) {
+        /* Queued behind a start that may still be waiting on consent. */
+        AudioCapture *audio = _audio;
+        dispatch_async(_audioQueue, ^{ [audio stop]; });
+    }
     [_clipboard stop];
     [_displayControl stop];
     [_display destroy];
