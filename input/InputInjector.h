@@ -52,6 +52,8 @@ NS_ASSUME_NONNULL_BEGIN
                                  subType:(uint32_t)subType;
 
 - (void)injectKeyEvent:(uint16_t)flags scanCode:(uint16_t)code;
+/* TS_UNICODE_KEYBOARD_EVENT: one UTF-16 code unit (surrogates arrive separately). */
+- (void)injectUnicodeEvent:(uint16_t)flags codeUnit:(uint16_t)unit;
 /* TS_SYNC_EVENT: releases every key we still hold (the client sends this on
  * focus-in, after it may have missed key-ups) and adopts its Caps Lock state. */
 - (void)synchronizeWithFlags:(uint32_t)toggleFlags;

@@ -33,6 +33,7 @@ typedef void (*RDPIrpCallback)(uint32_t ioStatus,
 
 typedef struct {
     RDPPeerInputCallback     onKeyboard;
+    RDPPeerInputCallback     onUnicode;   /* code = one UTF-16 code unit */
     RDPPeerSyncCallback      onSync;      /* TS_SYNC_EVENT toggle-key state */
     RDPPeerMouseCallback     onMouse;
     RDPPeerMouseCallback     onMouseEx;
