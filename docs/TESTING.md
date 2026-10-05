@@ -42,12 +42,22 @@ Test client: Windows `mstsc` → macOS Tahoe 26 arm64. Server build auto-updates
 |---|------|-------------|----------|--------|
 | 3.1 | Mouse move (1:1 position) | Move across whole screen | Tracks accurately | ✅ |
 | 3.2 | Cursor shapes (I-beam, resize, spinner) | Hover text / window edge | Shows correct cursor | ✅ (RDP_CURSOR_SHAPES=1, 24bpp) |
-| 3.3 | Left/right/middle click | Click around | Registers correctly | ❓ |
+| 3.3 | Left/right/middle click | Click around | Registers correctly | ✅ (left; double-click via click-state, VM test) |
 | 3.4 | Click-drag | Drag a window / select text | Works | ❓ |
 | 3.5 | Scroll wheel (vert/horiz) | Scroll a page | Scrolls correct direction | ❓ |
-| 3.6 | Keyboard — letters/numbers/symbols | Type in TextEdit | Correct chars | ❓ |
-| 3.7 | Modifiers (⌘ ⌥ ⌃ ⇧) + shortcuts | ⌘C / ⌘V / ⌘Tab / ⌘Space | Work | ❓ |
+| 3.6 | Keyboard — letters/numbers/symbols | Type in TextEdit | Correct chars | ✅ (JIS + ANSI clients, tests/keyboard) |
+| 3.7 | Modifiers (⌘ ⌥ ⌃ ⇧) + shortcuts | ⌘C / ⌘V / ⌘Tab / ⌘Space | Work | ✅ (⌘A/⌘C/⌘V, ⌃A; ⌘Tab untested) |
 | 3.8 | Special keys (F1-F12, Esc, arrows, Del) | Press them | Work | ❓ |
+| 3.9 | JIS keys | `@ [ ] : ^ ¥ _` (+⇧) from a JIS client | Typed as engraved | ✅ (Mac keyboard type 42) |
+| 3.10 | IME keys | 変換 / 無変換 / ひらがな / 半角全角 | Kana / Eisu / toggle | ✅ |
+| 3.11 | Unmapped scan codes | e.g. 0x5A, F21 | Ignored (verbose log), never "a" | ✅ |
+| 3.12 | Unicode input (iOS soft keyboard) | Type 日本🎉 | Inserted as-is | ✅ (rdp-keytest u:) |
+| 3.13 | Stuck modifiers | Hold ⇧, switch away, return | Released on sync / disconnect | ✅ |
+| 3.14 | Keypad, Pause, media keys | Press them | Digits; F15; volume/mute | ✅ |
+
+Keyboard tests are scripted: `tests/keyboard/build.sh`, run `KeyLogger.app` in the
+server's GUI session, then drive it with `rdp-keytest` (see the header of
+`tests/keyboard/rdp-keytest.c`). Japanese setup notes: `docs/JAPANESE-SETUP.md`.
 
 ## 4. Clipboard (CLIPRDR)
 | # | Item | How to test | Expected | Status |
@@ -147,8 +157,11 @@ Test client: Windows `mstsc` → macOS Tahoe 26 arm64. Server build auto-updates
 | `RDP_RDPDR_ENABLED` | 1 | Enable Windows drive redirection |
 | `RDP_AUDIO_LOCAL` | 1 | Also play audio on local Mac speakers |
 | `RDP_AUDIO_INPUT` | 0 | Receive Windows mic → Mac speakers (MS-RDPEAI) |
+| `RDP_KEYBOARD_TYPE` | auto | Mac keyboard type for injected keys: `auto` (from the client's layout/type), `jis`, `ansi`, `iso`, or a number |
+| `RDP_ZENKAKU_TOGGLE` | 1 | JIS clients: Hankaku/Zenkaku switches Kana ⇄ Eisu (0 = send it as the ` key) |
+| `RDP_SWAP_CTRL_CMD` | 0 | Swap Ctrl and Cmd (Windows-style ⌃C/⌃V) |
 | `RDP_ALLOW_IDLE_SLEEP` | 0 | Allow Mac to idle-sleep (breaks remote access) |
-| `RDP_UPDATE_ENABLED` | 1 | Enable auto-update |
+| `RDP_UPDATE_ENABLED` | 1 | Enable auto-update (`install-user.sh` writes 0 unless set: the updater would replace a source build with the upstream release) |
 | `RDP_UPDATE_INTERVAL_MIN` | 5 | Auto-update check interval in minutes |
 | `RDP_SIGN_IDENTITY` | — | Codesign identity SHA-1 for re-signing after update |
 | `RDP_SIGN_KEYCHAIN` | — | Keychain path for codesigning |
