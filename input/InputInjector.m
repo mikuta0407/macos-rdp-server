@@ -294,6 +294,11 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     BOOL _pausePending;            /* swallow the 0x45 that follows E1 1D */
     BOOL _keyDown[128];            /* Mac keycodes currently held */
     uint16_t _pendingHighSurrogate;
+    /* Click-count tracking so double/triple clicks register. */
+    CGMouseButton _lastClickButton;
+    CGPoint _lastClickPos;
+    CFAbsoluteTime _lastClickTime;
+    int64_t _clickCount;
 }
 
 + (void)startInputSourceMonitor {
@@ -596,6 +601,23 @@ static BOOL env_flag(const char *name, BOOL dflt) {
 
     CGEventRef event = CGEventCreateMouseEvent(NULL, type, pos, button);
     if (!event) return;
+    if (flags & (RDP_PTR_BUTTON1 | RDP_PTR_BUTTON2 | RDP_PTR_BUTTON3)) {
+        /* macOS recognises double/triple clicks only through the click-state
+         * field; count presses of the same button close in time and space. */
+        if (down) {
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            BOOL near = fabs(pos.x - _lastClickPos.x) <= 4 && fabs(pos.y - _lastClickPos.y) <= 4;
+            if (button == _lastClickButton && near &&
+                now - _lastClickTime <= [NSEvent doubleClickInterval])
+                _clickCount++;
+            else
+                _clickCount = 1;
+            _lastClickButton = button;
+            _lastClickPos = pos;
+            _lastClickTime = now;
+        }
+        CGEventSetIntegerValueField(event, kCGMouseEventClickState, _clickCount ? _clickCount : 1);
+    }
     CGEventSetFlags(event, [self modifierFlags]);
     CGEventPost(kCGSessionEventTap, event);
     CFRelease(event);
