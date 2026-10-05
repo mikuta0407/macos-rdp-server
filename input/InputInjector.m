@@ -265,6 +265,7 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     BOOL _capsLock;
     BOOL _pausePending;            /* swallow the 0x45 that follows E1 1D */
     BOOL _keyDown[128];            /* Mac keycodes currently held */
+    uint16_t _pendingHighSurrogate;
 }
 
 - (instancetype)initWithDisplayID:(CGDirectDisplayID)did
@@ -432,6 +433,30 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     rdp_debug("key scan=%s%02x %s -> vk=%u", isExtended ? "E0 " : "", code,
               isRelease ? "up" : "down", vk);
     [self postKey:vk down:!isRelease];
+}
+
+- (void)injectUnicodeEvent:(uint16_t)flags codeUnit:(uint16_t)unit {
+    if (flags & RDP_KBD_RELEASE) return;   /* the press already typed it */
+
+    UniChar chars[2];
+    UniCharCount n = 0;
+    if (CFStringIsSurrogateHighCharacter(unit)) { _pendingHighSurrogate = unit; return; }
+    if (CFStringIsSurrogateLowCharacter(unit)) {
+        if (!_pendingHighSurrogate) return;
+        chars[n++] = _pendingHighSurrogate;
+    }
+    _pendingHighSurrogate = 0;
+    chars[n++] = unit;
+    rdp_debug("unicode U+%04X%s", unit, n == 2 ? " (surrogate pair)" : "");
+
+    for (int down = 1; down >= 0; down--) {
+        CGEventRef ev = CGEventCreateKeyboardEvent(_source, 0, (bool)down);
+        if (!ev) return;
+        CGEventKeyboardSetUnicodeString(ev, n, chars);
+        CGEventSetFlags(ev, kCGEventFlagMaskNonCoalesced);
+        CGEventPost(kCGSessionEventTap, ev);
+        CFRelease(ev);
+    }
 }
 
 - (void)synchronizeWithFlags:(uint32_t)toggleFlags {

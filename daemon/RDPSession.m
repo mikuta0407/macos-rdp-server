@@ -69,6 +69,7 @@ static const uint32_t kDefaultBitrate = 8000;
     rdp_verbose("creating RDP peer for fd=%d", _fd);
     RDPPeerCallbacks cb = {
         .onKeyboard  = rdp_on_keyboard,
+        .onUnicode   = rdp_on_unicode,
         .onSync      = rdp_on_sync,
         .onMouse     = rdp_on_mouse,
         .onMouseEx   = rdp_on_mouse_ex,
@@ -145,6 +146,11 @@ static void rdp_on_keyboard(void *ud, uint16_t flags, uint16_t code) {
     RDPSession *self = (__bridge RDPSession *)ud;
     rdp_debug("key flags=0x%04x code=0x%02x", flags, code);
     [self.injector injectKeyEvent:flags scanCode:code];
+}
+
+static void rdp_on_unicode(void *ud, uint16_t flags, uint16_t code) {
+    RDPSession *self = (__bridge RDPSession *)ud;
+    [self.injector injectUnicodeEvent:flags codeUnit:code];
 }
 
 static void rdp_on_sync(void *ud, uint32_t toggleFlags) {
