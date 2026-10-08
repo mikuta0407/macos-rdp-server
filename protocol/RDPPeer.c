@@ -9,6 +9,7 @@
 #include <freerdp/server/rdpgfx.h>
 #include <freerdp/server/cliprdr.h>
 #include <freerdp/server/rdpsnd.h>
+#include <freerdp/server/disp.h>
 #include <freerdp/server/server-common.h>
 #include <freerdp/channels/rdpgfx.h>
 #include <freerdp/channels/wtsvc.h>
@@ -201,6 +202,7 @@ static BOOL context_new(freerdp_peer *peer, rdpContext *ctx) {
     pthread_mutexattr_settype(&mattr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&c->xportLock, &mattr);
     pthread_mutexattr_destroy(&mattr);
+    pthread_mutex_init(&c->layoutLock, NULL);
     /* Open the Virtual Channel Manager — all dynamic channels live under it. */
     c->vcm = WTSOpenServerA((LPSTR)peer->context);
     if (!c->vcm || c->vcm == INVALID_HANDLE_VALUE) {
@@ -223,6 +225,11 @@ static void context_free(freerdp_peer *peer, rdpContext *ctx) {
             c->webdavServers[i] = NULL;
         }
     }
+    if (c->disp) {
+        if (c->dispOpened && c->disp->Close) (void)c->disp->Close(c->disp);
+        disp_server_context_free(c->disp);
+        c->disp = NULL;
+    }
     if (c->gfx)    { rdpgfx_server_context_free(c->gfx);    c->gfx    = NULL; }
     if (c->cliprdr){ cliprdr_server_context_free(c->cliprdr);c->cliprdr= NULL; }
     if (c->rdpsnd) { rdpsnd_server_context_free(c->rdpsnd);  c->rdpsnd = NULL; }
@@ -238,6 +245,7 @@ static void context_free(freerdp_peer *peer, rdpContext *ctx) {
     if (c->vcm)    { WTSCloseServer(c->vcm);                 c->vcm    = NULL; }
     if (c->clipData) { free(c->clipData); c->clipData = NULL; c->clipLen = 0; }
     pthread_mutex_destroy(&c->xportLock);
+    pthread_mutex_destroy(&c->layoutLock);
     rdp_debug("peer context freed");
 }
 
@@ -647,6 +655,110 @@ uint32_t rdp_peer_get_audio_rate(freerdp_peer *peer) {
     return (uint32_t)ctx->rdpsnd->client_formats[idx].nSamplesPerSec;
 }
 
+/* ── Display control (MS-RDPEDISP) ─────────────────────────────────────── */
+
+static BOOL disp_channel_id_assigned(DispServerContext *disp, UINT32 channelId) {
+    RDPPeerContext *ctx = (RDPPeerContext *)disp->custom;
+    ctx->dispChannelId = channelId;
+    return TRUE;
+}
+
+/* Runs on the disp channel's own thread: record the request, nothing more. */
+static UINT disp_monitor_layout(DispServerContext *disp,
+                                const DISPLAY_CONTROL_MONITOR_LAYOUT_PDU *pdu) {
+    RDPPeerContext *ctx = (RDPPeerContext *)disp->custom;
+    if (!pdu || pdu->NumMonitors == 0 || !pdu->Monitors) return CHANNEL_RC_OK;
+    const DISPLAY_CONTROL_MONITOR_LAYOUT *m = &pdu->Monitors[0];
+    for (UINT32 i = 0; i < pdu->NumMonitors; i++)
+        if (pdu->Monitors[i].Flags & DISPLAY_CONTROL_MONITOR_PRIMARY) { m = &pdu->Monitors[i]; break; }
+    pthread_mutex_lock(&ctx->layoutLock);
+    ctx->layoutWidth   = m->Width & ~1u;      /* even, as H.264 needs */
+    ctx->layoutHeight  = m->Height & ~1u;
+    ctx->layoutScale   = m->DesktopScaleFactor ? m->DesktopScaleFactor : 100;
+    ctx->layoutPending = true;
+    pthread_mutex_unlock(&ctx->layoutLock);
+    rdp_info("display layout requested: %ux%u @%u%% (%u monitor%s)", m->Width, m->Height,
+             (unsigned)ctx->layoutScale, pdu->NumMonitors, pdu->NumMonitors == 1 ? "" : "s");
+    return CHANNEL_RC_OK;
+}
+
+/* The DVC creation answer arrives on the run loop. Only once the client has
+ * accepted the channel may the server send its capabilities. */
+static BOOL dvc_creation_status(void *userdata, UINT32 channelId, INT32 creationStatus) {
+    RDPPeerContext *ctx = (RDPPeerContext *)userdata;
+    if (ctx->disp && channelId == ctx->dispChannelId) {
+        if (creationStatus >= 0) {
+            UINT rc = ctx->disp->DisplayControlCaps(ctx->disp);
+            rdp_info("display control channel ready (caps sent rc=%u)", rc);
+        } else {
+            rdp_verbose("client refused the display control channel (%d)", creationStatus);
+        }
+    }
+    return TRUE;
+}
+
+bool rdp_peer_take_display_layout(freerdp_peer *peer, uint32_t *width, uint32_t *height,
+                                  uint32_t *scale) {
+    RDPPeerContext *ctx = (RDPPeerContext *)peer->context;
+    pthread_mutex_lock(&ctx->layoutLock);
+    bool pending = ctx->layoutPending;
+    if (pending) {
+        *width = ctx->layoutWidth;
+        *height = ctx->layoutHeight;
+        *scale = ctx->layoutScale;
+        ctx->layoutPending = false;
+    }
+    pthread_mutex_unlock(&ctx->layoutLock);
+    return pending;
+}
+
+bool rdp_peer_resize_graphics(freerdp_peer *peer, uint32_t width, uint32_t height) {
+    RDPPeerContext *ctx = (RDPPeerContext *)peer->context;
+    rdpSettings *s = peer->context->settings;
+    pthread_mutex_lock(&ctx->xportLock);
+    freerdp_settings_set_uint32(s, FreeRDP_DesktopWidth, width);
+    freerdp_settings_set_uint32(s, FreeRDP_DesktopHeight, height);
+    if (!ctx->gfx || !ctx->gfxReady) {
+        /* GFX not up yet: CapsAdvertise will create the surface at this size. */
+        pthread_mutex_unlock(&ctx->xportLock);
+        return true;
+    }
+    ctx->gfxReady = false;       /* frames of the old size are dropped from here */
+
+    MONITOR_DEF monitor = { 0 };
+    monitor.left = 0; monitor.top = 0;
+    monitor.right = (INT32)width - 1; monitor.bottom = (INT32)height - 1;
+    monitor.flags = MONITOR_PRIMARY;
+    RDPGFX_RESET_GRAPHICS_PDU reset = { 0 };
+    reset.width = width;
+    reset.height = height;
+    reset.monitorCount = 1;
+    reset.monitorDefArray = &monitor;
+    UINT rc = ctx->gfx->ResetGraphics(ctx->gfx, &reset);
+
+    /* ResetGraphics deletes every surface on the client; make a new one. */
+    ctx->surfaceId++;
+    RDPGFX_CREATE_SURFACE_PDU cs = { 0 };
+    cs.surfaceId   = (UINT16)ctx->surfaceId;
+    cs.width       = (UINT16)width;
+    cs.height      = (UINT16)height;
+    cs.pixelFormat = GFX_PIXEL_FORMAT_XRGB_8888;
+    if (rc == CHANNEL_RC_OK) rc = ctx->gfx->CreateSurface(ctx->gfx, &cs);
+    RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU ms = { 0 };
+    ms.surfaceId = (UINT16)ctx->surfaceId;
+    if (rc == CHANNEL_RC_OK) rc = ctx->gfx->MapSurfaceToOutput(ctx->gfx, &ms);
+
+    ctx->gfxReady = rc == CHANNEL_RC_OK;
+    ctx->sentKeyframe = false;
+    pthread_mutex_unlock(&ctx->xportLock);
+    if (ctx->gfxReady && ctx->callbacks.onKeyframeRequest) {
+        ctx->keyframeRequested = true;
+        ctx->callbacks.onKeyframeRequest(ctx->callbacks.userdata);
+    }
+    rdp_info("graphics reset to %ux%u (surface %u) rc=%u", width, height, ctx->surfaceId, rc);
+    return rc == CHANNEL_RC_OK;
+}
+
 /* ── PostConnect: open virtual channels ───────────────────────────────── */
 
 static BOOL peer_post_connect(freerdp_peer *peer) {
@@ -672,6 +784,19 @@ static BOOL peer_post_connect(freerdp_peer *peer) {
     if (ctx->gfx->Initialize)
         ctx->gfx->Initialize(ctx->gfx, TRUE);
     rdp_verbose("GFX context created (external-thread mode); open deferred");
+
+    /* Display control: a dynamic channel, opened with GFX once drdynvc is up. */
+    ctx->disp = disp_server_context_new(ctx->vcm);
+    if (ctx->disp) {
+        ctx->disp->custom                = ctx;
+        ctx->disp->rdpcontext            = peer->context;
+        ctx->disp->MaxNumMonitors        = 1;
+        ctx->disp->MaxMonitorAreaFactorA = 7680;
+        ctx->disp->MaxMonitorAreaFactorB = 4320;
+        ctx->disp->DispMonitorLayout     = disp_monitor_layout;
+        ctx->disp->ChannelIdAssigned     = disp_channel_id_assigned;
+        WTSVirtualChannelManagerSetDVCCreationCallback(ctx->vcm, dvc_creation_status, ctx);
+    }
 
     /* Clipboard. */
     ctx->cliprdr = cliprdr_server_context_new(ctx->vcm);
@@ -1019,6 +1144,20 @@ bool rdp_peer_run_once(freerdp_peer *peer) {
         }
     }
 
+    /* Display control, likewise a DVC. Optional: a client without it keeps
+     * the size it connected with. RDP_DISP=0 turns it off. */
+    if (ok && ctx->disp && !ctx->dispOpened &&
+        WTSVirtualChannelManagerGetDrdynvcState(ctx->vcm) == DRDYNVC_STATE_READY) {
+        const char *dispEnv = getenv("RDP_DISP");
+        ctx->dispOpened = true;     /* one attempt only */
+        if (dispEnv && strcmp(dispEnv, "0") == 0)
+            rdp_info("display control disabled (RDP_DISP=0)");
+        else if (ctx->disp->Open(ctx->disp) == CHANNEL_RC_OK)
+            rdp_verbose("display control channel requested");
+        else { rdp_verbose("display control channel open failed"); ctx->dispOpened = false;
+               disp_server_context_free(ctx->disp); ctx->disp = NULL; }
+    }
+
     /* Drain GFX channel messages once the channel is open. */
     if (ok && ctx->gfx && ctx->gfxOpened) {
         HANDLE gfxEvent = rdpgfx_server_get_event_handle(ctx->gfx);
@@ -1189,7 +1328,7 @@ void rdp_peer_send_default_cursor(freerdp_peer *peer) {
 
 void rdp_peer_send_cursor_shape(freerdp_peer *peer,
                                 const uint8_t *bgra, uint32_t w, uint32_t h,
-                                uint16_t hotX, uint16_t hotY) {
+                                uint16_t hotX, uint16_t hotY, bool alpha32) {
     if (!peer || !bgra || w == 0 || h == 0) return;
     RDPPeerContext *ctx = (RDPPeerContext *)peer->context;
 
@@ -1216,8 +1355,11 @@ void rdp_peer_send_cursor_shape(freerdp_peer *peer,
      * drop the alpha byte. Because alpha is premultiplied, (semi-)transparent
      * pixels are already darkened toward black; the AND mask masks them out, so
      * the dropped alpha costs nothing visible. */
-    const uint32_t xorBpp = 24;
-    uint32_t xorRowBytes = w * 3u;
+    /* A client that draws alpha pointers properly (MACRDPX CURSOR_ALPHA) gets
+     * the real 32bpp image, soft edges and shadow included. */
+    const uint32_t xorBpp = alpha32 ? 32 : 24;
+    const uint32_t xorPixelBytes = xorBpp / 8;
+    uint32_t xorRowBytes = w * xorPixelBytes;
     xorRowBytes = (xorRowBytes + 1u) & ~1u;          /* pad to 2 bytes (WORD) */
     uint32_t xorLen = xorRowBytes * h;
 
@@ -1243,10 +1385,21 @@ void rdp_peer_send_cursor_shape(freerdp_peer *peer,
         uint8_t *andRow = andData + (size_t)(h - 1 - y) * andRowBytes;
         for (uint32_t x = 0; x < w; x++) {
             const uint8_t *px  = srcRow + (size_t)x * 4;   /* B,G,R,A */
-            uint8_t       *dpx = dstRow + (size_t)x * 3;   /* B,G,R   */
+            uint8_t       *dpx = dstRow + (size_t)x * xorPixelBytes;
             dpx[0] = px[0];
             dpx[1] = px[1];
             dpx[2] = px[2];
+            if (alpha32) {
+                /* RDP alpha pointers are straight alpha; ours is premultiplied. */
+                uint8_t a = px[3];
+                if (a && a < 255) {
+                    dpx[0] = (uint8_t)MIN(255u, (px[0] * 255u + a / 2) / a);
+                    dpx[1] = (uint8_t)MIN(255u, (px[1] * 255u + a / 2) / a);
+                    dpx[2] = (uint8_t)MIN(255u, (px[2] * 255u + a / 2) / a);
+                }
+                dpx[3] = a;
+                continue;          /* AND mask stays 0: alpha decides */
+            }
             if (px[3] < 128) {   /* BGRA -> A at +3; <128 == (near-)transparent */
                 /* MSB-first bit order within each byte. */
                 andRow[x / 8] |= (uint8_t)(0x80u >> (x % 8));

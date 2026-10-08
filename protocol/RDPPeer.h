@@ -9,6 +9,7 @@
 #include <freerdp/server/rdpgfx.h>
 #include <freerdp/server/cliprdr.h>
 #include <freerdp/server/rdpsnd.h>
+#include <freerdp/server/disp.h>
 #include <freerdp/channels/wtsvc.h>
 #include <winpr/wtsapi.h>
 #include <macrdpx/macrdpx.h>
@@ -128,6 +129,15 @@ struct rdp_peer_context {
     void                *audioInput;   /* __strong RDPAudioInput * under ARC */
     /* MACRDPX (Mac RDP eXtensions) static VC. Non-NULL only when the client
      * joined the channel (mRemote in its macOS mode) and RDP_MACRDPX != 0. */
+    /* MS-RDPEDISP display control: the client asks for a new desktop size
+     * (window resized, Retina scale). The disp thread only records the
+     * request; the session applies it from its own loop. */
+    DispServerContext   *disp;
+    bool                 dispOpened;
+    uint32_t             dispChannelId;
+    pthread_mutex_t      layoutLock;
+    bool                 layoutPending;
+    uint32_t             layoutWidth, layoutHeight, layoutScale;
     HANDLE               mrxChannel;
     HANDLE               mrxEvent;
     bool                 mrxBroken;      /* a malformed message: ignore the rest */
@@ -273,7 +283,7 @@ void rdp_drive_mount_placeholder(const char *driveName, uint32_t deviceId);
  * (only call when the shape actually changes). */
 void rdp_peer_send_cursor_shape(freerdp_peer *peer,
                                 const uint8_t *bgra, uint32_t w, uint32_t h,
-                                uint16_t hotX, uint16_t hotY);
+                                uint16_t hotX, uint16_t hotY, bool alpha32);
 
 /*
  * MACRDPX channel (protocol/RDPMacrdpx.c).
@@ -290,3 +300,16 @@ bool rdp_peer_open_macrdpx(freerdp_peer *peer);
 void rdp_peer_pump_macrdpx(freerdp_peer *peer);
 bool rdp_peer_send_macrdpx(freerdp_peer *peer, const mrx_message *message);
 void rdp_peer_close_macrdpx(RDPPeerContext *ctx);
+
+/*
+ * Display control (MS-RDPEDISP).
+ *
+ * rdp_peer_take_display_layout - the newest monitor layout the client asked
+ *   for since the last call: primary monitor size in pixels and its desktop
+ *   scale factor (100 = normal, 200 = Retina). Returns false when none.
+ * rdp_peer_resize_graphics - move the graphics pipeline to a new desktop size:
+ *   ResetGraphics + a new surface, then a keyframe. Takes xportLock.
+ */
+bool rdp_peer_take_display_layout(freerdp_peer *peer, uint32_t *width, uint32_t *height,
+                                  uint32_t *scale);
+bool rdp_peer_resize_graphics(freerdp_peer *peer, uint32_t width, uint32_t height);

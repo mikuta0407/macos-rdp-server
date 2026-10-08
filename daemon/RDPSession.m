@@ -86,6 +86,9 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
 @property (nonatomic, assign) uint32_t streamWidth;
 @property (nonatomic, assign) uint32_t streamHeight;
 @property (nonatomic, strong) RDPAudioSink *mrxSink;
+/* Bumped whenever the encoder/capture pair is replaced (resize), so frames
+ * still in flight from the old pair are dropped instead of sent. */
+@property (atomic, assign) uint64_t mediaGeneration;
 @end
 
 @implementation RDPSession
@@ -163,6 +166,13 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
                      kNegotiationTimeoutSecs, _address.UTF8String);
             break;
         }
+        /* Display-control requests, applied here on the session queue where
+         * the peer is ours alone. Held until the session is up. */
+        if (_sessionState == RDPSessionStateActive) {
+            uint32_t lw, lh, ls;
+            if (rdp_peer_take_display_layout(_peer, &lw, &lh, &ls))
+                [self applyLayoutWidth:lw height:lh scale:ls];
+        }
         /* rdpsnd format negotiation completes asynchronously (Activated callback)
          * AFTER audio capture starts. The client plays our PCM at the rate IT
          * selected — rdpsnd does not resample — so the tap must be resampled to
@@ -238,7 +248,7 @@ static void rdp_on_clipboard(void *ud, const uint8_t *data, size_t len,
     if (!(_mrxCaps & MRX_CAP_STREAM_CONFIG) || !_peer || !_streamWidth) return;
     mrx_message m = { .type = MRX_MSG_STREAM_STATUS };
     m.u.stream_status.max_fps       = (uint16_t)_maxFps;
-    m.u.stream_status.scale_percent = 100;
+    m.u.stream_status.scale_percent = _display.hiDPI ? 200 : 100;
     m.u.stream_status.bitrate_kbps  = _bitrateKbps;
     m.u.stream_status.width         = _streamWidth;
     m.u.stream_status.height        = _streamHeight;
@@ -346,6 +356,87 @@ static void rdp_on_keyframe_request(void *ud) {
     [self.encoder forceKeyframe];
 }
 
+/* ── Media: capture -> encoder -> GFX, rebuilt on every resize ────────────── */
+
+- (BOOL)wantsHiDPIForScale:(uint32_t)scale {
+    const char *env = getenv("RDP_HIDPI");          /* auto (default) | 0 | 1 */
+    if (env && strcmp(env, "0") == 0) return NO;
+    if (env && strcmp(env, "1") == 0) return YES;
+    return scale >= 150;
+}
+
+- (void)startMediaWidth:(uint32_t)width height:(uint32_t)height
+              displayID:(CGDirectDisplayID)displayID {
+    _streamWidth = width;
+    _streamHeight = height;
+    uint64_t generation = ++self.mediaGeneration;
+    _encoder = [[FrameEncoder alloc] initWithWidth:width height:height
+                                           bitrate:_bitrateKbps];
+    __weak typeof(self) weak = self;
+    _encoder.outputHandler = ^(const uint8_t *data, size_t len, BOOL keyFrame,
+                               uint16_t dx, uint16_t dy, uint16_t dw, uint16_t dh) {
+        typeof(self) strong = weak;
+        if (!strong || strong.mediaGeneration != generation) return;   /* old size */
+        rdp_debug("encoded frame: len=%zu keyFrame=%d dirty=(%u,%u,%ux%u)",
+                  len, keyFrame, dx, dy, dw, dh);
+        rdp_peer_send_h264_frame(strong.peer, data, len, width, height,
+                                 keyFrame ? true : false, dx, dy, dw, dh);
+    };
+    [_encoder start];
+    rdp_verbose("H.264 encoder started at %u kbps", _bitrateKbps);
+
+    _capture = [[ScreenCapture alloc] initWithDisplayID:displayID];
+    _capture.maxFps = _maxFps;
+    _capture.frameHandler = ^(IOSurfaceRef surface, uint32_t fw, uint32_t fh,
+                               CGRect dirty) {
+        (void)fw; (void)fh;
+        typeof(self) strong = weak;
+        if (!strong || strong.mediaGeneration != generation) return;
+        /* Clamp the dirty origin/size to UINT16 surface-pixel coordinates. */
+        uint16_t dx = (uint16_t)MAX(0.0, dirty.origin.x);
+        uint16_t dy = (uint16_t)MAX(0.0, dirty.origin.y);
+        uint16_t dw = (uint16_t)MIN((double)width,  dirty.size.width);
+        uint16_t dh = (uint16_t)MIN((double)height, dirty.size.height);
+        rdp_debug("captured frame: dirty=(%u,%u,%ux%u)", dx, dy, dw, dh);
+        [strong.encoder encodeFrame:surface dirtyX:dx dirtyY:dy dirtyW:dw dirtyH:dh];
+    };
+    if ([_capture startWithWidth:width height:height])
+        rdp_verbose("screen capture started on displayID=%u", displayID);
+    else
+        rdp_error("screen capture FAILED on displayID=%u — desktop will be black "
+                  "until Screen Recording is granted", displayID);
+}
+
+- (void)stopMedia {
+    self.mediaGeneration++;
+    [_capture stop];
+    [_encoder stop];
+    _capture = nil;
+    _encoder = nil;
+}
+
+/* A display-control request from the client (window resized, scale changed):
+ * the virtual display, the stream and the GFX surface all follow it. */
+- (void)applyLayoutWidth:(uint32_t)w height:(uint32_t)h scale:(uint32_t)scale {
+    w = MIN(MAX(w, 200u), 7680u) & ~1u;
+    h = MIN(MAX(h, 200u), 4320u) & ~1u;
+    BOOL hidpi = [self wantsHiDPIForScale:scale];
+    if (w == _streamWidth && h == _streamHeight && hidpi == _display.hiDPI) return;
+    rdp_info("resizing the desktop %ux%u -> %ux%u%s", _streamWidth, _streamHeight, w, h,
+             hidpi ? " HiDPI" : "");
+    [self stopMedia];
+    if (_display && ![_display reconfigureWidth:w height:h hiDPI:hidpi]) {
+        rdp_error("virtual display could not change size; keeping %ux%u", _streamWidth, _streamHeight);
+        [self startMediaWidth:_streamWidth height:_streamHeight displayID:_display.displayID];
+        return;
+    }
+    CGDirectDisplayID displayID = _display ? _display.displayID : CGMainDisplayID();
+    rdp_peer_resize_graphics(_peer, w, h);
+    [self startMediaWidth:w height:h displayID:displayID];
+    [_injector setSourceWidth:w height:h];
+    [self sendMrxStreamStatus];
+}
+
 - (void)setupDisplayAndMediaForWidth:(uint32_t)w height:(uint32_t)h {
     /* mstsc can re-activate (e.g. on a client-side resize). We only authenticate
      * and bring the display up once — re-entry after we're active is a no-op. */
@@ -395,7 +486,12 @@ static void rdp_on_keyframe_request(void *ud) {
 
     rdp_info("setting up display %ux%u for %s", width, height, _address.UTF8String);
 
-    _display = [[VirtualDisplay alloc] initWithWidth:width height:height];
+    /* Retina: a client drawing at 150% or more (a Mac's 200%) gets a HiDPI
+     * virtual display, so text is rendered at its pixel density instead of
+     * being drawn small. */
+    uint32_t scale = freerdp_settings_get_uint32(_peer->context->settings, FreeRDP_DesktopScaleFactor);
+    _display = [[VirtualDisplay alloc] initWithWidth:width height:height
+                                               hiDPI:[self wantsHiDPIForScale:scale]];
     if (![_display create]) {
         rdp_verbose("VirtualDisplay unavailable, falling back to main display");
         _display = nil;
@@ -412,39 +508,7 @@ static void rdp_on_keyframe_request(void *ud) {
     _displayControl = [[DisplayControl alloc] initWithVirtualDisplayID:displayID];
     [_displayControl start];
 
-    _streamWidth = width;
-    _streamHeight = height;
-    _encoder = [[FrameEncoder alloc] initWithWidth:width height:height
-                                           bitrate:_bitrateKbps];
-    __weak typeof(self) weak = self;
-    _encoder.outputHandler = ^(const uint8_t *data, size_t len, BOOL keyFrame,
-                               uint16_t dx, uint16_t dy, uint16_t dw, uint16_t dh) {
-        rdp_debug("encoded frame: len=%zu keyFrame=%d dirty=(%u,%u,%ux%u)",
-                  len, keyFrame, dx, dy, dw, dh);
-        rdp_peer_send_h264_frame(weak.peer, data, len, width, height,
-                                 keyFrame ? true : false, dx, dy, dw, dh);
-    };
-    [_encoder start];
-    rdp_verbose("H.264 encoder started at %u kbps", _bitrateKbps);
-
-    _capture = [[ScreenCapture alloc] initWithDisplayID:displayID];
-    _capture.maxFps = _maxFps;
-    _capture.frameHandler = ^(IOSurfaceRef surface, uint32_t fw, uint32_t fh,
-                               CGRect dirty) {
-        (void)fw; (void)fh;
-        /* Clamp the dirty origin/size to UINT16 surface-pixel coordinates. */
-        uint16_t dx = (uint16_t)MAX(0.0, dirty.origin.x);
-        uint16_t dy = (uint16_t)MAX(0.0, dirty.origin.y);
-        uint16_t dw = (uint16_t)MIN((double)width,  dirty.size.width);
-        uint16_t dh = (uint16_t)MIN((double)height, dirty.size.height);
-        rdp_debug("captured frame: dirty=(%u,%u,%ux%u)", dx, dy, dw, dh);
-        [weak.encoder encodeFrame:surface dirtyX:dx dirtyY:dy dirtyW:dw dirtyH:dh];
-    };
-    if ([_capture startWithWidth:width height:height])
-        rdp_verbose("screen capture started on displayID=%u", displayID);
-    else
-        rdp_error("screen capture FAILED on displayID=%u — desktop will be black "
-                  "until Screen Recording is granted", displayID);
+    [self startMediaWidth:width height:height displayID:displayID];
 
     _injector  = [[InputInjector alloc] initWithDisplayID:displayID
                                               sourceWidth:width
@@ -455,6 +519,7 @@ static void rdp_on_keyframe_request(void *ud) {
                                                type:freerdp_settings_get_uint32(s, FreeRDP_KeyboardType)
                                             subType:freerdp_settings_get_uint32(s, FreeRDP_KeyboardSubType)];
     }
+    __weak typeof(self) weak = self;
     _clipboard = [[ClipboardSync alloc] init];
     _clipboard.sendToClientBlock = ^(const uint8_t *data, size_t len, uint32_t fmt) {
         rdp_verbose("sending clipboard to client: format=0x%08x len=%zu", fmt, len);
@@ -525,7 +590,10 @@ static void rdp_on_keyframe_request(void *ud) {
         _cursor = [[CursorCapture alloc] init];
         _cursor.handler = ^(const uint8_t *bgra, uint32_t cw, uint32_t ch,
                             uint16_t hotX, uint16_t hotY) {
-            rdp_peer_send_cursor_shape(weak.peer, bgra, cw, ch, hotX, hotY);
+            typeof(self) strong = weak;
+            if (!strong) return;
+            rdp_peer_send_cursor_shape(strong.peer, bgra, cw, ch, hotX, hotY,
+                                       (strong.mrxCaps & MRX_CAP_CURSOR_ALPHA) != 0);
         };
         [_cursor start];
         rdp_info("cursor-shape streaming ON (%s)",
@@ -558,8 +626,7 @@ static void rdp_on_keyframe_request(void *ud) {
     /* Don't leave modifiers stuck down on the Mac if the client vanished mid-chord. */
     [_injector releaseAllKeys];
     [_cursor stop];
-    [_capture stop];
-    [_encoder stop];
+    [self stopMedia];
     if (_mrxSink) {
         os_unfair_lock_lock(&_mrxSink->lock);
         _mrxSink->peer = NULL;
