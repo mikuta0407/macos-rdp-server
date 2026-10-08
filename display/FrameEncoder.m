@@ -2,6 +2,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <CoreMedia/CoreMedia.h>
 #import <IOSurface/IOSurface.h>
+#import <pthread.h>
 #define RDP_LOG_COMPONENT "encoder"
 #include "logging/RDPLog.h"
 
@@ -39,12 +40,17 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
     *w = (uint16_t)(p >> 32); *h = (uint16_t)(p >> 48);
 }
 
-@implementation FrameEncoder
+@implementation FrameEncoder {
+    /* Guards _session: capture callbacks encode on their own queue while a
+     * resize stops this encoder from the session queue. */
+    pthread_mutex_t _sessionLock;
+}
 
 - (instancetype)initWithWidth:(uint32_t)width height:(uint32_t)height
                       bitrate:(uint32_t)bitrateKbps {
     if ((self = [super init])) {
         _w = width; _h = height; _bitrateKbps = bitrateKbps;
+        pthread_mutex_init(&_sessionLock, NULL);
         /* Pre-size to a typical compressed frame; grows on demand if needed. */
         _annexBuffer = [[NSMutableData alloc] initWithCapacity:512 * 1024];
     }
@@ -57,11 +63,13 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
 - (void)setTargetBitrateKbps:(uint32_t)kbps {
     if (kbps == 0 || kbps == _bitrateKbps) return;
     _bitrateKbps = kbps;
+    pthread_mutex_lock(&_sessionLock);
     if (_session) {
         VTSessionSetProperty(_session, kVTCompressionPropertyKey_AverageBitRate,
                              (__bridge CFTypeRef)@((int32_t)(kbps * 1000)));
         rdp_info("H.264 bit rate now %u kbps", kbps);
     }
+    pthread_mutex_unlock(&_sessionLock);
 }
 - (uint32_t)height { return _h; }
 
@@ -106,12 +114,15 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
 - (void)encodeFrame:(IOSurfaceRef)surface
              dirtyX:(uint16_t)dirtyX dirtyY:(uint16_t)dirtyY
              dirtyW:(uint16_t)dirtyW dirtyH:(uint16_t)dirtyH {
-    if (!_session || !surface) return;
+    if (!surface) return;
+    pthread_mutex_lock(&_sessionLock);
+    if (!_session) { pthread_mutex_unlock(&_sessionLock); return; }
     CVPixelBufferRef pixbuf = NULL;
     CVReturn cvErr = CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault,
                                                       surface, NULL, &pixbuf);
     if (cvErr != kCVReturnSuccess || !pixbuf) {
         rdp_error("CVPixelBufferCreateWithIOSurface failed: %d", cvErr);
+        pthread_mutex_unlock(&_sessionLock);
         return;
     }
     CMTime pts = CMTimeMake(_frameIndex++, 60);
@@ -131,6 +142,7 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
                                     frameProps, refcon, NULL);
     if (frameProps) CFRelease(frameProps);
     CVPixelBufferRelease(pixbuf);
+    pthread_mutex_unlock(&_sessionLock);
 }
 
 - (void)forceKeyframe {
@@ -138,13 +150,18 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
 }
 
 - (void)stop {
-    if (!_session) return;
+    /* Detach under the lock - an encode in flight finishes first - then
+     * drain and release outside it. */
+    pthread_mutex_lock(&_sessionLock);
+    VTCompressionSessionRef session = _session;
+    _session = NULL;
+    pthread_mutex_unlock(&_sessionLock);
+    if (!session) return;
     rdp_verbose("stopping encoder after %lld frames (%llu bytes encoded)",
                 _frameIndex, _bytesEncoded);
-    VTCompressionSessionCompleteFrames(_session, kCMTimeIndefinite);
-    VTCompressionSessionInvalidate(_session);
-    CFRelease(_session);
-    _session = NULL;
+    VTCompressionSessionCompleteFrames(session, kCMTimeIndefinite);
+    VTCompressionSessionInvalidate(session);
+    CFRelease(session);
 }
 
 - (void)handleSampleBuffer:(CMSampleBufferRef)buf
