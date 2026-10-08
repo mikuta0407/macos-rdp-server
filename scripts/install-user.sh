@@ -174,7 +174,13 @@ PL
 # 7. (Re)load the agent -----------------------------------------------------------------
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
 launchctl enable "$GUI/$LABEL" 2>/dev/null || true   # clear any prior `disable` override
-launchctl bootstrap "$GUI" "$PLIST"
+# bootout returns before the old job is gone; bootstrap then fails with
+# "5: Input/output error". Give it a few tries.
+for attempt in 1 2 3 4 5; do
+  launchctl bootstrap "$GUI" "$PLIST" 2>/dev/null && break
+  [ "$attempt" = 5 ] && launchctl bootstrap "$GUI" "$PLIST"
+  sleep 1
+done
 
 cat <<EOF
 
