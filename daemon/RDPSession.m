@@ -260,6 +260,7 @@ static void rdp_on_clipboard(void *ud, const uint8_t *data, size_t len,
     if (!_mrxCaps || !_injector) return;
     if (_mrxKeyboardType) [_injector setMacKeyboardType:_mrxKeyboardType];
     [self sendMrxStreamStatus];
+    if (_mrxCaps & MRX_CAP_CURSOR_ALPHA) [self startCursorShapesIfWanted];
     if (_mrxCaps & MRX_CAP_INPUT_SOURCE) {
         RDPAudioSink *sink = [RDPAudioSink new];
         sink->lock = OS_UNFAIR_LOCK_INIT;
@@ -506,6 +507,15 @@ static void rdp_on_keyframe_request(void *ud) {
      * color-pointer quirk under investigation). Default keeps the client-side
      * SYSPTR_DEFAULT arrow above, which is always visible. Re-enable once the
      * pointer encoding is fixed (likely switch to 24bpp XOR + 1bpp AND mask). */
+    [self startCursorShapesIfWanted];
+
+    /* A MACRDPX HELLO that arrived before activation takes effect now. */
+    [self startMrxFeatures];
+}
+
+- (void)startCursorShapesIfWanted {
+    if (_cursor || !_peer) return;
+    __weak typeof(self) weak = self;
     const char *curShapes = getenv("RDP_CURSOR_SHAPES");
     /* A MACRDPX client draws alpha pointers properly, so it gets real shapes. */
     BOOL wantShapes = (curShapes && strcmp(curShapes, "1") == 0) ||
@@ -520,13 +530,10 @@ static void rdp_on_keyframe_request(void *ud) {
         [_cursor start];
         rdp_info("cursor-shape streaming ON (%s)",
                  (_mrxCaps & MRX_CAP_CURSOR_ALPHA) ? "MACRDPX client" : "RDP_CURSOR_SHAPES=1");
-    } else {
+    } else if (!_mrxCaps) {
         rdp_info("cursor-shape streaming OFF (default) — client draws the system "
                  "arrow; set RDP_CURSOR_SHAPES=1 to stream real Mac cursor shapes");
     }
-
-    /* A MACRDPX HELLO that arrived before activation takes effect now. */
-    [self startMrxFeatures];
 }
 
 - (void)disconnect {
