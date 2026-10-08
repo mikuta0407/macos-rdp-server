@@ -13,6 +13,8 @@ A lightweight RDP server daemon for macOS Tahoe and later. Connect to your Mac f
 - **DriverKit HID extension** *(optional, requires Apple Developer account)* — injects input at the HID stack level, works at the login window and in secure input fields
 - **launchd integration** — auto-starts at boot, restarts on crash
 - **TLS encryption** — self-signed certificate generated on install; clients trust on first connect
+- **Follows the client's window** — display control (MS-RDPEDISP) resizes the virtual display, the stream and the GFX surface live; a client at 150 % scale or more (a Mac's Retina 200 %) gets a **HiDPI** virtual display, so text is rendered at the client's density
+- **Mac-to-Mac extensions (MACRDPX)** — a Mac client that joins the `MACRDPX` channel sends keys as Mac keys with exact modifiers (⌘ stays ⌘, Fn, left/right), the pointer with real click counts, pixel-precise trackpad scrolling with momentum, and can choose the frame rate and bit rate mid-session. See [docs/MAC-CLIENTS.md](docs/MAC-CLIENTS.md). Every other client is plain RDP, unchanged
 
 ## Requirements
 
@@ -72,9 +74,10 @@ After installation, open any RDP client and connect to your Mac's IP address.
 # 1. Install dependencies
 brew install freerdp cmake openssl pkgconf
 
-# 2. Clone
-git clone https://github.com/grioghar/macos-rdp-server.git
+# 2. Clone (with the macrdpx submodule)
+git clone --recurse-submodules https://github.com/grioghar/macos-rdp-server.git
 cd macos-rdp-server
+# an existing checkout: git submodule update --init
 
 # 3. Build
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
@@ -144,6 +147,17 @@ sudo launchctl load -w /Library/LaunchDaemons/com.macosrdp.daemon.plist
 |---|---|---|
 | `--port` | `3389` | TCP port to listen on |
 | `--log-level` | `info` | Log verbosity (see below) |
+
+Stream and display settings, as environment variables of the LaunchAgent:
+
+| Variable | Default | Description |
+|---|---|---|
+| `RDP_MAX_FPS` | `30` | Frame-rate cap (1–120); a MACRDPX client may change it per session |
+| `RDP_BITRATE_KBPS` | `8000` | H.264 target bit rate; likewise per session for MACRDPX clients |
+| `RDP_HIDPI` | auto | `auto`: HiDPI virtual display at a client scale ≥ 150 %; `0` never; `1` always |
+| `RDP_DISP` | on | `0` disables display control (the desktop keeps its connect-time size) |
+| `RDP_MACRDPX` | on | `0` disables the Mac-to-Mac extensions channel |
+| `RDP_CURSOR_SHAPES` | auto | `1` streams real cursor shapes to every client; `0` never. MACRDPX clients get them by default |
 
 ## Logging
 
@@ -234,6 +248,9 @@ sudo bash scripts/uninstall.sh
 │              │                                            │
 │         ClipboardSync      RDPLog                         │
 │        (NSPasteboard)   (ERROR/INFO/VERBOSE/DEBUG)        │
+│              │                                            │
+│         MACRDPX channel ── external/macrdpx (submodule)   │
+│        (Mac keys, pointer, scroll, stream config)         │
 └─────────────────────────────────────────────────────────┘
 
 Optional DriverKit HID extension (requires Apple Developer account):
