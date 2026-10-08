@@ -174,3 +174,7 @@ server's GUI session, then drive it with `rdp-keytest` (see the header of
 4. **Multi-monitor per-display** — span mode works (one big virtual display); per-display virtual displays not built.
 5. **Printer/USB redirection** — out of scope for personal use.
 6. **Upstream FreeRDP PRs** — 1 PERF + 2 MEDIUM fixes ready to file (commands in docs/security-audit-2026-06-02.md).
+7. **To do on a real Windows machine (mstsc)** — checked 2026-10-09 only from a Windows 11 ARM VM in UTM, which could not settle these:
+   - mstsc → server shows a **black desktop** after logon (GFX ready, keyframes sent). The same with the build before MACRDPX/display control (c45f4df), so not a regression; likely the VM's mstsc failing to show AVC420. Check on real hardware.
+   - **Display control with mstsc**: the server sends the DISP caps, but mstsc in the VM never sent a monitor layout on resize/maximise. Check that a real mstsc resizes the desktop (window resize, *Dynamic resolution* on) and that the RESET_GRAPHICS on resize does not drop it (an earlier note says mstsc dropped on RESET_GRAPHICS at connect).
+   - mstsc credentials: the server is TLS without NLA, so mstsc only sends credentials it has saved (`cmdkey /generic:TERMSRV/<host> ...` or the save option); otherwise authentication fails with user '(none)'.
