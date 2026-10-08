@@ -54,7 +54,10 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
 @property (nonatomic, assign) RDPSessionState sessionState;
 @property (nonatomic, strong) NSString *address;
 @property (nonatomic, assign) freerdp_peer *peer;
+/* The session's own display, or nil while it shows the Mac's main display. */
 @property (nonatomic, strong) VirtualDisplay  *display;
+/* The display the session captures and puts input on. */
+@property (nonatomic, assign) CGDirectDisplayID displayID;
 @property (nonatomic, strong) DisplayControl  *displayControl;
 @property (nonatomic, strong) ScreenCapture   *capture;
 @property (nonatomic, strong) FrameEncoder    *encoder;
@@ -248,7 +251,7 @@ static void rdp_on_clipboard(void *ud, const uint8_t *data, size_t len,
     if (!(_mrxCaps & MRX_CAP_STREAM_CONFIG) || !_peer || !_streamWidth) return;
     mrx_message m = { .type = MRX_MSG_STREAM_STATUS };
     m.u.stream_status.max_fps       = (uint16_t)_maxFps;
-    m.u.stream_status.scale_percent = _display.hiDPI ? 200 : 100;
+    m.u.stream_status.scale_percent = (uint16_t)lround([self streamPixelsPerPoint] * 100.0);
     m.u.stream_status.bitrate_kbps  = _bitrateKbps;
     m.u.stream_status.width         = _streamWidth;
     m.u.stream_status.height        = _streamHeight;
@@ -366,6 +369,50 @@ static void rdp_on_keyframe_request(void *ud) {
     return scale >= 150;
 }
 
+/* RDP_DISPLAY_MODE: main (default) shows and controls the Mac's own main
+ * display, as Screen Sharing does; virtual gives each session a display of its
+ * own, sized to the client. A Mac with no display lit (a closed lid, a mini
+ * without a monitor) gets a virtual one either way. */
+- (BOOL)wantsVirtualDisplay {
+    const char *mode = getenv("RDP_DISPLAY_MODE");
+    if (mode && strcmp(mode, "virtual") == 0) return YES;
+    CGDirectDisplayID active[16];
+    uint32_t count = 0;
+    CGDirectDisplayID main = CGMainDisplayID();
+    if (CGGetActiveDisplayList(16, active, &count) == kCGErrorSuccess)
+        for (uint32_t i = 0; i < count; i++)
+            if (active[i] == main) return NO;
+    rdp_info("no display is lit — using a virtual display instead of the main one");
+    return YES;
+}
+
+/* The size to stream the main display at: its own shape, in points, or in
+ * pixels for a client drawing at Retina density, kept within what H.264
+ * decoders take (4096x2304). */
+- (void)mainDisplayStreamSizeHiDPI:(BOOL)hidpi width:(uint32_t *)w height:(uint32_t *)h {
+    CGRect bounds = CGDisplayBounds(_displayID);
+    double dw = bounds.size.width, dh = bounds.size.height;
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(_displayID);
+    if (mode) {
+        if (hidpi) {
+            dw = (double)CGDisplayModeGetPixelWidth(mode);
+            dh = (double)CGDisplayModeGetPixelHeight(mode);
+        }
+        CGDisplayModeRelease(mode);
+    }
+    double fit = MIN(1.0, MIN(4096.0 / MAX(dw, dh), 2304.0 / MIN(dw, dh)));
+    *w = MAX((uint32_t)(dw * fit), 200u) & ~1u;
+    *h = MAX((uint32_t)(dh * fit), 200u) & ~1u;
+}
+
+/* Stream pixels per point of the captured display. The picture keeps its
+ * shape inside the stream, so it is the smaller of the two ratios. */
+- (double)streamPixelsPerPoint {
+    CGRect bounds = CGDisplayBounds(_displayID);
+    if (!_streamWidth || bounds.size.width <= 0 || bounds.size.height <= 0) return 1.0;
+    return MIN(_streamWidth / bounds.size.width, _streamHeight / bounds.size.height);
+}
+
 - (void)startMediaWidth:(uint32_t)width height:(uint32_t)height
               displayID:(CGDirectDisplayID)displayID {
     _streamWidth = width;
@@ -417,25 +464,30 @@ static void rdp_on_keyframe_request(void *ud) {
 }
 
 /* A display-control request from the client (window resized, scale changed):
- * the virtual display, the stream and the GFX surface all follow it. */
+ * the virtual display, the stream and the GFX surface all follow it. The main
+ * display keeps its size, so a client that can resize gets the stream in the
+ * main display's shape, at the density it asked for. */
 - (void)applyLayoutWidth:(uint32_t)w height:(uint32_t)h scale:(uint32_t)scale {
-    w = MIN(MAX(w, 200u), 7680u) & ~1u;
-    h = MIN(MAX(h, 200u), 4320u) & ~1u;
     BOOL hidpi = [self wantsHiDPIForScale:scale];
-    if (w == _streamWidth && h == _streamHeight && hidpi == _display.hiDPI) return;
+    if (_display) {
+        w = MIN(MAX(w, 200u), 7680u) & ~1u;
+        h = MIN(MAX(h, 200u), 4320u) & ~1u;
+    } else {
+        [self mainDisplayStreamSizeHiDPI:hidpi width:&w height:&h];
+    }
+    if (w == _streamWidth && h == _streamHeight && (!_display || hidpi == _display.hiDPI)) return;
     rdp_info("resizing the desktop %ux%u -> %ux%u%s", _streamWidth, _streamHeight, w, h,
              hidpi ? " HiDPI" : "");
     [self stopMedia];
     if (_display && ![_display reconfigureWidth:w height:h hiDPI:hidpi]) {
         rdp_error("virtual display could not change size; keeping %ux%u", _streamWidth, _streamHeight);
-        [self startMediaWidth:_streamWidth height:_streamHeight displayID:_display.displayID];
+        [self startMediaWidth:_streamWidth height:_streamHeight displayID:_displayID];
         return;
     }
-    CGDirectDisplayID displayID = _display ? _display.displayID : CGMainDisplayID();
     rdp_peer_resize_graphics(_peer, w, h);
-    [self startMediaWidth:w height:h displayID:displayID];
+    [self startMediaWidth:w height:h displayID:_displayID];
     [_injector setSourceWidth:w height:h];
-    _cursor.pixelScale = _display.hiDPI ? 2.0 : 1.0;
+    _cursor.pixelScale = [self streamPixelsPerPoint];
     [self sendMrxStreamStatus];
 }
 
@@ -492,22 +544,30 @@ static void rdp_on_keyframe_request(void *ud) {
      * virtual display, so text is rendered at its pixel density instead of
      * being drawn small. */
     uint32_t scale = freerdp_settings_get_uint32(_peer->context->settings, FreeRDP_DesktopScaleFactor);
-    _display = [[VirtualDisplay alloc] initWithWidth:width height:height
-                                               hiDPI:[self wantsHiDPIForScale:scale]];
-    if (![_display create]) {
-        rdp_verbose("VirtualDisplay unavailable, falling back to main display");
-        _display = nil;
-    } else {
-        rdp_verbose("VirtualDisplay created: displayID=%u", _display.displayID);
+    if ([self wantsVirtualDisplay]) {
+        _display = [[VirtualDisplay alloc] initWithWidth:width height:height
+                                                   hiDPI:[self wantsHiDPIForScale:scale]];
+        if (![_display create]) {
+            rdp_verbose("VirtualDisplay unavailable, falling back to main display");
+            _display = nil;
+        } else {
+            rdp_verbose("VirtualDisplay created: displayID=%u", _display.displayID);
+        }
     }
-
+    /* On the main display the client's size stays as it is: the picture is fitted
+     * into it, as mstsc drops a session whose graphics are reset before the first
+     * frame. A client that resizes gets the main display's shape then. */
     CGDirectDisplayID displayID = _display ? _display.displayID : CGMainDisplayID();
+    _displayID = displayID;
+    if (!_display) rdp_info("showing the main display %u", displayID);
 
     /* Wake the Mac + keep it awake for the whole session (replaces caffeinate),
      * and privacy-dim the BUILT-IN panel (brightness -> 0) so a bystander can't
-     * watch the remote session. Pass the virtual display id so we never dim the
-     * screen the remote actually captures. RDP_SHARED_MODE=1 skips dimming. */
-    _displayControl = [[DisplayControl alloc] initWithVirtualDisplayID:displayID];
+     * watch the remote session. A virtual display is left lit; a built-in main
+     * display is dimmed too, as brightness never reaches the capture.
+     * RDP_SHARED_MODE=1 skips dimming. */
+    _displayControl = [[DisplayControl alloc]
+        initWithVirtualDisplayID:_display ? displayID : kCGNullDirectDisplay];
     [_displayControl start];
 
     [self startMediaWidth:width height:height displayID:displayID];
@@ -590,7 +650,7 @@ static void rdp_on_keyframe_request(void *ud) {
     if (curShapes && strcmp(curShapes, "0") == 0) wantShapes = NO;
     if (wantShapes) {
         _cursor = [[CursorCapture alloc] init];
-        _cursor.pixelScale = _display.hiDPI ? 2.0 : 1.0;
+        _cursor.pixelScale = [self streamPixelsPerPoint];
         /* An alpha-pointer client takes the large pointer, so a 2x cursor
          * keeps its full size. */
         _cursor.maxDimension = (_mrxCaps & MRX_CAP_CURSOR_ALPHA) ? 256 : 96;
