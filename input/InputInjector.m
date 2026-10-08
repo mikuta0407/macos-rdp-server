@@ -353,6 +353,11 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     return self;
 }
 
+- (void)setSourceWidth:(uint32_t)width height:(uint32_t)height {
+    _srcW = width;
+    _srcH = height;
+}
+
 - (void)dealloc {
     [self releaseAllKeys];
     if (_source) CFRelease(_source);

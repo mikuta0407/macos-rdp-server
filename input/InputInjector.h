@@ -49,6 +49,10 @@ typedef void (^InputSourceObserver)(BOOL asciiCapable, NSString *_Nullable sourc
                       sourceWidth:(uint32_t)sourceWidth
                      sourceHeight:(uint32_t)sourceHeight;
 
+/* The RDP desktop size changed (display control); pointer coordinates now
+ * arrive in this space. */
+- (void)setSourceWidth:(uint32_t)width height:(uint32_t)height;
+
 /* Choose the Mac keyboard type (ANSI / ISO / JIS) from what the client reported
  * in its core data (MS-RDPBCGR TS_UD_CS_CORE keyboardLayout / keyboardType).
  * RDP_KEYBOARD_TYPE=auto|jis|ansi|iso|<number> overrides the detection. */
