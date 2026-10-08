@@ -434,6 +434,7 @@ static void rdp_on_keyframe_request(void *ud) {
     rdp_peer_resize_graphics(_peer, w, h);
     [self startMediaWidth:w height:h displayID:displayID];
     [_injector setSourceWidth:w height:h];
+    _cursor.pixelScale = _display.hiDPI ? 2.0 : 1.0;
     [self sendMrxStreamStatus];
 }
 
@@ -588,6 +589,10 @@ static void rdp_on_keyframe_request(void *ud) {
     if (curShapes && strcmp(curShapes, "0") == 0) wantShapes = NO;
     if (wantShapes) {
         _cursor = [[CursorCapture alloc] init];
+        _cursor.pixelScale = _display.hiDPI ? 2.0 : 1.0;
+        /* An alpha-pointer client takes the large pointer, so a 2x cursor
+         * keeps its full size. */
+        _cursor.maxDimension = (_mrxCaps & MRX_CAP_CURSOR_ALPHA) ? 256 : 96;
         _cursor.handler = ^(const uint8_t *bgra, uint32_t cw, uint32_t ch,
                             uint16_t hotX, uint16_t hotY) {
             typeof(self) strong = weak;
