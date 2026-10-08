@@ -28,6 +28,7 @@ Test client: Windows `mstsc` → macOS Tahoe 26 arm64. Server build auto-updates
 |---|------|-------------|----------|--------|
 | 2.1 | Desktop renders (AVC420/H.264) | Connect | Live desktop, correct content | ✅ |
 | 2.2 | Virtual display at client resolution | Connect at 3440×1440 | No pillarbox, native 1:1 | ✅ |
+| 2.2a | Main display (default) | Connect sdl-freerdp at 1280×1000 to a 4:3 Mac; then mRemote (iPhone sim) | Mac's own screen fitted with thin bars, clicks land where aimed; a resizing client gets the screen's own shape (2048×1536 Retina) | ✅ (VM, 2026-10-09) |
 | 2.3 | Correct colors | View photos / gradients | Accurate color | ❓ |
 | 2.4 | Refresh on minimize/restore | Minimize then restore mstsc | Repaints cleanly | ✅ (SuppressOutput + IDR) |
 | 2.5 | Frame rate / smoothness | Drag a window, scroll | Fluid ~30 fps | ❓ |

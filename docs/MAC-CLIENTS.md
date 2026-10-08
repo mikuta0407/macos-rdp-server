@@ -25,9 +25,11 @@ mRemote client.
 | Input source | — | The server reports its keyboard input source (ASCII or a Japanese/Chinese/Korean input mode) |
 | Cursor | System arrow (shapes off by default) | Real cursor shapes, 32-bit with alpha, at the display's pixel scale |
 
-Display control (MS-RDPEDISP) and HiDPI are **not** extensions: every client
-that resizes its window gets a resized desktop, and every client at 150 %
-scale or more gets a HiDPI virtual display.
+Display control (MS-RDPEDISP) and HiDPI are **not** extensions. On the main
+display (the default), every client that resizes its window gets the stream
+in the display's own shape, in pixels at 150 % scale or more. With
+`RDP_DISPLAY_MODE=virtual`, it gets a desktop of its window's size instead,
+and a HiDPI virtual display at 150 % or more.
 
 ## How a session goes
 
