@@ -104,6 +104,13 @@ static uint64_t fnv1a(const uint8_t *p, size_t n, uint64_t seed) {
     return h;
 }
 
+- (void)setPixelScale:(double)pixelScale {
+    if (_pixelScale == pixelScale) return;
+    _pixelScale = pixelScale;
+    _haveSeed = NO;      /* resend the current shape at the new size */
+    _lastHash = 0;
+}
+
 - (void)poll {
     /* Cheap pre-check: the CGS seed bumps on every cursor change. If it hasn't
      * moved since our last read, the shape is identical — skip the full read. */
@@ -211,16 +218,14 @@ static uint64_t fnv1a(const uint8_t *p, size_t n, uint64_t seed) {
                    hotSpot:(CGPoint)hot
                      width:(uint32_t *)outW height:(uint32_t *)outH
                       hotX:(uint16_t *)outHotX hotY:(uint16_t *)outHotY {
-    uint32_t w = srcW, h = srcH;
-    double scale = 1.0;
-    uint32_t maxDim = w > h ? w : h;
-    if (maxDim > kMaxCursorDim) {
-        scale = (double)kMaxCursorDim / (double)maxDim;
-        w = (uint32_t)llround(srcW * scale);
-        h = (uint32_t)llround(srcH * scale);
-        if (w == 0) w = 1;
-        if (h == 0) h = 1;
-    }
+    double scale = self.pixelScale > 0 ? self.pixelScale : 1.0;
+    uint32_t limit = self.maxDimension ? self.maxDimension : kMaxCursorDim;
+    uint32_t maxDim = srcW > srcH ? srcW : srcH;
+    if (maxDim * scale > limit) scale = (double)limit / (double)maxDim;
+    uint32_t w = (uint32_t)llround(srcW * scale);
+    uint32_t h = (uint32_t)llround(srcH * scale);
+    if (w == 0) w = 1;
+    if (h == 0) h = 1;
 
     size_t stride = (size_t)w * 4;
     size_t bytes  = stride * h;

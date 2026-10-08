@@ -21,6 +21,12 @@ typedef void (^CursorCaptureBlock)(const uint8_t *bgra,
 @interface CursorCapture : NSObject
 
 @property (nonatomic, copy, nullable) CursorCaptureBlock handler;
+/* Desktop pixels per point: 2 on a HiDPI virtual display, so the cursor is
+ * sent at the size it appears. Changing it resends the current shape. */
+@property (atomic, assign) double pixelScale;
+/* Largest side sent, in pixels: 96 for the classic pointer PDU, up to 384 for
+ * clients known to take the large pointer. */
+@property (atomic, assign) uint32_t maxDimension;
 
 /* Start polling at ~12 Hz. The first shape fires almost immediately. Safe to
  * call from any thread. */
