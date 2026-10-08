@@ -204,6 +204,10 @@ static CGEventFlags extra_flags_for_vk(uint16_t vk) {
  * refreshes it on every input-source change. -1 = unknown. */
 
 static _Atomic int gAsciiCapable = -1;
+/* Main-thread only: the selected source's id, and who wants to hear of changes
+ * (the MACRDPX INPUT_SOURCE report). */
+static NSString *gInputSourceID;
+static InputSourceObserver gInputSourceObserver;
 
 static void refresh_ascii_capable(void) {
     TISInputSourceRef src = TISCopyCurrentKeyboardInputSource();
@@ -212,6 +216,8 @@ static void refresh_ascii_capable(void) {
     CFStringRef sid = TISGetInputSourceProperty(src, kTISPropertyInputSourceID);
     int value = (ascii && CFBooleanGetValue(ascii)) ? 1 : 0;
     atomic_store(&gAsciiCapable, value);
+    gInputSourceID = sid ? [(__bridge NSString *)sid copy] : nil;
+    if (gInputSourceObserver) gInputSourceObserver(value != 0, gInputSourceID);
     rdp_debug("input source: %s (ascii-capable=%d)",
               sid ? [(__bridge NSString *)sid UTF8String] : "?", value);
     CFRelease(src);
@@ -305,6 +311,14 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     CGPoint _lastClickPos;
     CFAbsoluteTime _lastClickTime;
     int64_t _clickCount;
+    /* MACRDPX: sub-pixel scroll remainders, so integer point deltas add up. */
+    double _scrollRemX, _scrollRemY;
+}
+
++ (void)setInputSourceObserver:(InputSourceObserver)observer {
+    gInputSourceObserver = [observer copy];
+    if (gInputSourceObserver && atomic_load(&gAsciiCapable) >= 0)
+        gInputSourceObserver(atomic_load(&gAsciiCapable) != 0, gInputSourceID);
 }
 
 + (void)startInputSourceMonitor {
@@ -575,7 +589,7 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     }
 }
 
-- (void)injectMouseEvent:(uint16_t)flags x:(uint16_t)x y:(uint16_t)y {
+- (CGPoint)displayPointForX:(double)x y:(double)y {
     /* The client sends pointer coords in the RDP desktop space (0..srcW, 0..srcH).
      * The capture preserves the Mac's aspect ratio inside that surface, so the Mac
      * image occupies a CENTERED sub-rectangle with letterbox/pillarbox bars when the
@@ -597,8 +611,13 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     double fy = (contentH > 0) ? ((double)y - offY) / contentH : 0;
     if (fx < 0) fx = 0; else if (fx > 1) fx = 1;
     if (fy < 0) fy = 0; else if (fy > 1) fy = 1;
-    CGPoint pos = CGPointMake(bounds.origin.x + fx * bounds.size.width,
-                              bounds.origin.y + fy * bounds.size.height);
+    return CGPointMake(bounds.origin.x + fx * bounds.size.width,
+                       bounds.origin.y + fy * bounds.size.height);
+}
+
+
+- (void)injectMouseEvent:(uint16_t)flags x:(uint16_t)x y:(uint16_t)y {
+    CGPoint pos = [self displayPointForX:x y:y];
 
     BOOL down = (flags & RDP_PTR_DOWN) != 0;
     CGEventType type;
@@ -675,6 +694,177 @@ static BOOL env_flag(const char *name, BOOL dflt) {
     CGEventSetFlags(event, [self modifierFlags]);   /* ⌃-scroll zoom, ⇧-scroll etc. */
     CGEventPost(kCGSessionEventTap, event);
     CFRelease(event);
+}
+
+/* ── MACRDPX native input ────────────────────────────────────────────────── */
+
+- (void)setMacKeyboardType:(uint32_t)keyboardType {
+    if (keyboardType == 0) return;
+    _learnJIS = NO;
+    [self applyKeyboardType:keyboardType how:"MACRDPX client"];
+}
+
+/* Keep the scan-code path's view of the modifiers in step, so a standard
+ * event arriving later (a TS_SYNC, a fast-path click) stamps the same flags. */
+- (void)adoptMacModifierFlags:(uint64_t)flags {
+    for (size_t i = 0; i < sizeof(kModifiers) / sizeof(kModifiers[0]); i++)
+        _keyDown[kModifiers[i].vk] = (flags & kModifiers[i].device) != 0;
+    _capsLock = (flags & kCGEventFlagMaskAlphaShift) != 0;
+}
+
+- (void)postMacKeycode:(uint16_t)vk down:(BOOL)down repeat:(BOOL)repeat flags:(uint64_t)flags {
+    CGEventRef ev = CGEventCreateKeyboardEvent(_source, (CGKeyCode)vk, down);
+    if (!ev) return;
+    CGEventFlags f = (CGEventFlags)flags | kCGEventFlagMaskNonCoalesced;
+    if (mrx_keycode_is_modifier(vk)) {
+        CGEventSetType(ev, kCGEventFlagsChanged);
+    } else {
+        f |= extra_flags_for_vk(vk);
+        if (repeat) CGEventSetIntegerValueField(ev, kCGKeyboardEventAutorepeat, 1);
+    }
+    CGEventSetFlags(ev, f);
+    CGEventPost(kCGSessionEventTap, ev);
+    CFRelease(ev);
+}
+
+- (void)injectMacKey:(const mrx_key *)key {
+    uint16_t vk = key->keycode;
+    BOOL down = key->action == MRX_KEY_DOWN;
+    BOOL repeat = (key->flags & MRX_KEY_FLAG_REPEAT) != 0;
+    rdp_debug("mac key vk=%u %s%s flags=0x%llx", vk, down ? "down" : "up",
+              repeat ? " (repeat)" : "", (unsigned long long)key->modifier_flags);
+    if (vk >= 128) return;
+    if (!mrx_keycode_is_modifier(vk)) {
+        /* An up for a key we never pressed would only confuse the app. */
+        if (!down && !_keyDown[vk]) return;
+        _keyDown[vk] = down;
+    } else if (vk == kVK_CapsLock || vk == kVK_Function) {
+        if (!down) return;       /* one flags-changed per change of state */
+    }
+    if (down && vk == kVK_JIS_Kana) atomic_store(&gAsciiCapable, 0);
+    if (down && vk == kVK_JIS_Eisu) atomic_store(&gAsciiCapable, 1);
+    [self adoptMacModifierFlags:key->modifier_flags];
+    [self postMacKeycode:vk down:down repeat:repeat flags:key->modifier_flags];
+}
+
+- (void)syncMacModifiers:(uint64_t)flags {
+    rdp_debug("mac modifiers sync flags=0x%llx", (unsigned long long)flags);
+    /* Release every non-modifier key still held; the client lost them. */
+    CGEventFlags now = [self modifierFlags];
+    for (uint16_t vk = 0; vk < 128; vk++) {
+        if (!_keyDown[vk] || mrx_keycode_is_modifier(vk)) continue;
+        _keyDown[vk] = NO;
+        [self postMacKeycode:vk down:NO repeat:NO flags:now];
+    }
+    /* Then move each modifier to the client's state, one flags-changed each. */
+    for (size_t i = 0; i < sizeof(kModifiers) / sizeof(kModifiers[0]); i++) {
+        BOOL want = (flags & kModifiers[i].device) != 0;
+        if (want == _keyDown[kModifiers[i].vk]) continue;
+        _keyDown[kModifiers[i].vk] = want;
+        [self postMacKeycode:kModifiers[i].vk down:want repeat:NO flags:[self modifierFlags]];
+    }
+    BOOL caps = (flags & kCGEventFlagMaskAlphaShift) != 0;
+    if (caps != _capsLock) {
+        _capsLock = caps;
+        [self postMacKeycode:kVK_CapsLock down:YES repeat:NO flags:[self modifierFlags]];
+    }
+}
+
+static CGMouseButton cg_button(uint8_t b) {
+    switch (b) {
+    case MRX_BUTTON_LEFT:  return kCGMouseButtonLeft;
+    case MRX_BUTTON_RIGHT: return kCGMouseButtonRight;
+    default:               return (CGMouseButton)b;
+    }
+}
+
+- (void)injectMacPointer:(const mrx_pointer *)p {
+    CGPoint pos = [self displayPointForX:p->x y:p->y];
+    CGEventType type;
+    CGMouseButton button = cg_button(p->button);
+    uint32_t held = p->buttons_down;
+
+    if (p->action == MRX_POINTER_MOVE) {
+        if (held & (1u << MRX_BUTTON_LEFT))       { type = kCGEventLeftMouseDragged;  button = kCGMouseButtonLeft; }
+        else if (held & (1u << MRX_BUTTON_RIGHT)) { type = kCGEventRightMouseDragged; button = kCGMouseButtonRight; }
+        else if (held) {
+            type = kCGEventOtherMouseDragged;
+            button = cg_button((uint8_t)__builtin_ctz(held));
+        } else type = kCGEventMouseMoved;
+    } else {
+        BOOL down = p->action == MRX_POINTER_DOWN;
+        if (p->button == MRX_BUTTON_LEFT)       type = down ? kCGEventLeftMouseDown  : kCGEventLeftMouseUp;
+        else if (p->button == MRX_BUTTON_RIGHT) type = down ? kCGEventRightMouseDown : kCGEventRightMouseUp;
+        else                                     type = down ? kCGEventOtherMouseDown : kCGEventOtherMouseUp;
+    }
+    _leftDown   = (held & (1u << MRX_BUTTON_LEFT)) != 0;
+    _rightDown  = (held & (1u << MRX_BUTTON_RIGHT)) != 0;
+    _middleDown = (held & (1u << MRX_BUTTON_MIDDLE)) != 0;
+
+    CGEventRef ev = CGEventCreateMouseEvent(_source, type, pos, button);
+    if (!ev) return;
+    if (p->action != MRX_POINTER_MOVE) {
+        /* The client's own click count: it saw the real timing and distance. */
+        CGEventSetIntegerValueField(ev, kCGMouseEventClickState, p->click_count ? p->click_count : 1);
+        if (p->button > MRX_BUTTON_RIGHT)
+            CGEventSetIntegerValueField(ev, kCGMouseEventButtonNumber, p->button);
+    }
+    [self adoptMacModifierFlags:p->modifier_flags];
+    CGEventSetFlags(ev, (CGEventFlags)p->modifier_flags);
+    CGEventPost(kCGSessionEventTap, ev);
+    CFRelease(ev);
+}
+
+/* NSEvent.Phase bits -> CGScrollPhase / CGMomentumScrollPhase. */
+static int64_t cg_scroll_phase(uint8_t ns) {
+    if (ns & MRX_PHASE_MAY_BEGIN) return kCGScrollPhaseMayBegin;
+    if (ns & MRX_PHASE_BEGAN)     return kCGScrollPhaseBegan;
+    if (ns & MRX_PHASE_ENDED)     return kCGScrollPhaseEnded;
+    if (ns & MRX_PHASE_CANCELLED) return kCGScrollPhaseCancelled;
+    if (ns & (MRX_PHASE_CHANGED | MRX_PHASE_STATIONARY)) return kCGScrollPhaseChanged;
+    return 0;
+}
+
+static int64_t cg_momentum_phase(uint8_t ns) {
+    if (ns & MRX_PHASE_BEGAN) return kCGMomentumScrollPhaseBegin;
+    if (ns & (MRX_PHASE_ENDED | MRX_PHASE_CANCELLED)) return kCGMomentumScrollPhaseEnd;
+    if (ns & (MRX_PHASE_CHANGED | MRX_PHASE_STATIONARY)) return kCGMomentumScrollPhaseContinue;
+    return kCGMomentumScrollPhaseNone;
+}
+
+- (void)injectMacScroll:(const mrx_scroll *)sc {
+    BOOL pixel = sc->unit == MRX_SCROLL_PIXEL;
+    double dx = sc->delta_x, dy = sc->delta_y;
+    int32_t ix, iy;
+    if (pixel) {
+        /* Point deltas are integers; carry the fractions so slow trackpad
+         * motion still moves, and a gesture's total is exact. */
+        _scrollRemX += dx; _scrollRemY += dy;
+        ix = (int32_t)_scrollRemX; iy = (int32_t)_scrollRemY;
+        _scrollRemX -= ix; _scrollRemY -= iy;
+    } else {
+        ix = (int32_t)lround(dx); iy = (int32_t)lround(dy);
+    }
+    CGEventRef ev = CGEventCreateScrollWheelEvent2(_source,
+        pixel ? kCGScrollEventUnitPixel : kCGScrollEventUnitLine, 2, iy, ix, 0);
+    if (!ev) return;
+    if (pixel) {
+        CGEventSetIntegerValueField(ev, kCGScrollWheelEventIsContinuous, 1);
+        CGEventSetIntegerValueField(ev, kCGScrollWheelEventPointDeltaAxis1, iy);
+        CGEventSetIntegerValueField(ev, kCGScrollWheelEventPointDeltaAxis2, ix);
+        CGEventSetDoubleValueField(ev, kCGScrollWheelEventFixedPtDeltaAxis1, dy);
+        CGEventSetDoubleValueField(ev, kCGScrollWheelEventFixedPtDeltaAxis2, dx);
+        /* A coarse line value for apps that only read DeltaAxis (~10 px/line). */
+        CGEventSetIntegerValueField(ev, kCGScrollWheelEventDeltaAxis1, (int64_t)lround(dy / 10.0));
+        CGEventSetIntegerValueField(ev, kCGScrollWheelEventDeltaAxis2, (int64_t)lround(dx / 10.0));
+    }
+    CGEventSetIntegerValueField(ev, kCGScrollWheelEventScrollPhase, cg_scroll_phase(sc->phase));
+    CGEventSetIntegerValueField(ev, kCGScrollWheelEventMomentumPhase, cg_momentum_phase(sc->momentum_phase));
+    CGEventSetFlags(ev, (CGEventFlags)sc->modifier_flags);
+    CGEventPost(kCGSessionEventTap, ev);
+    CFRelease(ev);
+    /* A cancelled gesture has no momentum to carry the remainder into. */
+    if (sc->phase & MRX_PHASE_CANCELLED) _scrollRemX = _scrollRemY = 0;
 }
 
 @end

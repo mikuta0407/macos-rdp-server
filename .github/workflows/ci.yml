@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          submodules: recursive
 
       - name: Install build tools
         run: |
@@ -110,6 +112,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          submodules: recursive
 
       - name: Show Swift version
         run: swift --version
@@ -134,6 +138,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          submodules: recursive
 
       - name: Download arm64 binary artifact
         uses: actions/download-artifact@v8.0.1

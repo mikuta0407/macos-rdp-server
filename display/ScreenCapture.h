@@ -17,6 +17,8 @@ typedef void (^ScreenCaptureFrameBlock)(IOSurfaceRef surface,
 - (instancetype)initWithDisplayID:(CGDirectDisplayID)displayID;
 - (BOOL)startWithWidth:(uint32_t)width height:(uint32_t)height;
 - (void)stop;
+/* Frame-rate cap (1...120). Set before start, or while running. */
+@property (nonatomic, assign) uint32_t maxFps;
 
 @end
 

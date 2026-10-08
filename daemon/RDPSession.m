@@ -19,6 +19,23 @@
 static const uint32_t kDefaultWidth   = 1920;
 static const uint32_t kDefaultHeight  = 1080;
 static const uint32_t kDefaultBitrate = 8000;
+static const uint32_t kDefaultMaxFps  = 30;
+
+/* What this server offers a MACRDPX client (external/macrdpx). */
+static const mrx_caps kServerMrxCaps = MRX_CAP_MAC_KEYS | MRX_CAP_POINTER |
+    MRX_CAP_PRECISE_SCROLL | MRX_CAP_STREAM_CONFIG | MRX_CAP_INPUT_SOURCE |
+    MRX_CAP_CURSOR_ALPHA;
+
+static uint32_t env_u32(const char *name, uint32_t dflt) {
+    const char *v = getenv(name);
+    if (!v || !*v) return dflt;
+    long n = strtol(v, NULL, 10);
+    return n > 0 ? (uint32_t)n : dflt;
+}
+
+static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
 
 /* Hand-off point between the audio capture thread and the peer. Audio starts
  * asynchronously (see setupDisplayAndMediaForWidth:), so the capture callback can
@@ -59,6 +76,16 @@ static const uint32_t kDefaultBitrate = 8000;
  * skip re-authenticating / re-activating on a subsequent Activate (mstsc may
  * re-activate on a resize). Guarded by the serial session queue. */
 @property (nonatomic, assign) BOOL activated;
+/* MACRDPX: features agreed with the client (0 = a standard RDP client), the
+ * keyboard type it reported before the injector existed, and the stream rate
+ * in effect. mrxSink lets the main thread (input-source changes) send safely. */
+@property (nonatomic, assign) mrx_caps mrxCaps;
+@property (nonatomic, assign) uint32_t mrxKeyboardType;
+@property (nonatomic, assign) uint32_t maxFps;
+@property (nonatomic, assign) uint32_t bitrateKbps;
+@property (nonatomic, assign) uint32_t streamWidth;
+@property (nonatomic, assign) uint32_t streamHeight;
+@property (nonatomic, strong) RDPAudioSink *mrxSink;
 @end
 
 @implementation RDPSession
@@ -97,8 +124,12 @@ static const uint32_t kDefaultBitrate = 8000;
         .onClipboard = rdp_on_clipboard,
         .onReady     = rdp_on_ready,
         .onKeyframeRequest = rdp_on_keyframe_request,
+        .onMacrdpx   = rdp_on_macrdpx,
         .userdata    = (__bridge void *)self,
     };
+
+    _maxFps      = clamp_u32(env_u32("RDP_MAX_FPS", kDefaultMaxFps), 1, 120);
+    _bitrateKbps = clamp_u32(env_u32("RDP_BITRATE_KBPS", kDefaultBitrate), 250, 200000);
 
     _peer = rdp_peer_create(_fd, &cb);
     if (!_peer) {
@@ -201,6 +232,113 @@ static void rdp_on_clipboard(void *ud, const uint8_t *data, size_t len,
     [self.clipboard receiveFromClient:data length:len format:format];
 }
 
+/* ── MACRDPX (Mac client extensions) ─────────────────────────────────────── */
+
+- (void)sendMrxStreamStatus {
+    if (!(_mrxCaps & MRX_CAP_STREAM_CONFIG) || !_peer || !_streamWidth) return;
+    mrx_message m = { .type = MRX_MSG_STREAM_STATUS };
+    m.u.stream_status.max_fps       = (uint16_t)_maxFps;
+    m.u.stream_status.scale_percent = 100;
+    m.u.stream_status.bitrate_kbps  = _bitrateKbps;
+    m.u.stream_status.width         = _streamWidth;
+    m.u.stream_status.height        = _streamHeight;
+    rdp_peer_send_macrdpx(_peer, &m);
+}
+
+- (void)applyStreamFps:(uint32_t)fps kbps:(uint32_t)kbps {
+    if (fps)  _maxFps      = clamp_u32(fps, 1, 120);
+    if (kbps) _bitrateKbps = clamp_u32(kbps, 250, 200000);
+    _capture.maxFps = _maxFps;
+    [_encoder setTargetBitrateKbps:_bitrateKbps];
+    rdp_info("stream: %u fps, %u kbps (client request %u fps / %u kbps)",
+             _maxFps, _bitrateKbps, fps, kbps);
+    [self sendMrxStreamStatus];
+}
+
+/* Starts after activation, once the peer and injector exist. */
+- (void)startMrxFeatures {
+    if (!_mrxCaps || !_injector) return;
+    if (_mrxKeyboardType) [_injector setMacKeyboardType:_mrxKeyboardType];
+    [self sendMrxStreamStatus];
+    if (_mrxCaps & MRX_CAP_INPUT_SOURCE) {
+        RDPAudioSink *sink = [RDPAudioSink new];
+        sink->lock = OS_UNFAIR_LOCK_INIT;
+        sink->peer = _peer;
+        _mrxSink = sink;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [InputInjector setInputSourceObserver:^(BOOL ascii, NSString *sid) {
+                const char *u = sid.UTF8String ?: "";
+                size_t n = strlen(u);
+                mrx_message m = { .type = MRX_MSG_INPUT_SOURCE };
+                m.u.input_source.ascii_capable = ascii ? 1 : 0;
+                m.u.input_source.id = u;
+                m.u.input_source.id_length = (uint8_t)(n > MRX_MAX_NAME_BYTES ? MRX_MAX_NAME_BYTES : n);
+                os_unfair_lock_lock(&sink->lock);
+                if (sink->peer) rdp_peer_send_macrdpx(sink->peer, &m);
+                os_unfair_lock_unlock(&sink->lock);
+            }];
+        });
+    }
+}
+
+- (void)handleMrxMessage:(const mrx_message *)m {
+    switch (m->type) {
+    case MRX_MSG_HELLO: {
+        if (m->u.hello.role != MRX_ROLE_CLIENT) return;
+        _mrxCaps = mrx_negotiate(m->u.hello.caps, kServerMrxCaps);
+        rdp_info("MACRDPX client \"%.*s\" v%u caps=0x%x -> using 0x%x",
+                 (int)m->u.hello.name_length, m->u.hello.name ?: "", m->u.hello.version,
+                 m->u.hello.caps, _mrxCaps);
+        char name[128];
+        snprintf(name, sizeof name, "macos-rdp-server; macOS %s",
+                 NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String ?: "?");
+        mrx_message r = { .type = MRX_MSG_HELLO };
+        r.u.hello.version = MRX_PROTOCOL_VERSION;
+        r.u.hello.role = MRX_ROLE_SERVER;
+        r.u.hello.caps = kServerMrxCaps;
+        r.u.hello.name = name;
+        r.u.hello.name_length = (uint8_t)strlen(name);
+        rdp_peer_send_macrdpx(_peer, &r);
+        [self startMrxFeatures];   /* no-op until activation */
+        return;
+    }
+    case MRX_MSG_KEYBOARD_INFO:
+        _mrxKeyboardType = m->u.keyboard_info.keyboard_type;
+        if (_injector) [_injector setMacKeyboardType:_mrxKeyboardType];
+        return;
+    case MRX_MSG_STREAM_CONFIG:
+        if (!(_mrxCaps & MRX_CAP_STREAM_CONFIG)) return;
+        [self applyStreamFps:m->u.stream_config.max_fps kbps:m->u.stream_config.bitrate_kbps];
+        return;
+    default:
+        break;
+    }
+    /* Input: only once agreed, and only while there is somewhere to put it. */
+    if (!_injector) return;
+    switch (m->type) {
+    case MRX_MSG_KEY:
+        if (_mrxCaps & MRX_CAP_MAC_KEYS) [_injector injectMacKey:&m->u.key];
+        break;
+    case MRX_MSG_MODIFIERS:
+        if (_mrxCaps & MRX_CAP_MAC_KEYS) [_injector syncMacModifiers:m->u.modifiers.modifier_flags];
+        break;
+    case MRX_MSG_POINTER:
+        if (_mrxCaps & MRX_CAP_POINTER) [_injector injectMacPointer:&m->u.pointer];
+        break;
+    case MRX_MSG_SCROLL:
+        if (_mrxCaps & MRX_CAP_PRECISE_SCROLL) [_injector injectMacScroll:&m->u.scroll];
+        break;
+    default:
+        rdp_verbose("MACRDPX %s ignored on the server", mrx_message_type_name(m->type));
+        break;
+    }
+}
+
+static void rdp_on_macrdpx(void *ud, const mrx_message *m) {
+    RDPSession *self = (__bridge RDPSession *)ud;
+    [self handleMrxMessage:m];
+}
+
 static void rdp_on_keyframe_request(void *ud) {
     RDPSession *self = (__bridge RDPSession *)ud;
     rdp_debug("keyframe requested by peer");
@@ -273,8 +411,10 @@ static void rdp_on_keyframe_request(void *ud) {
     _displayControl = [[DisplayControl alloc] initWithVirtualDisplayID:displayID];
     [_displayControl start];
 
+    _streamWidth = width;
+    _streamHeight = height;
     _encoder = [[FrameEncoder alloc] initWithWidth:width height:height
-                                           bitrate:kDefaultBitrate];
+                                           bitrate:_bitrateKbps];
     __weak typeof(self) weak = self;
     _encoder.outputHandler = ^(const uint8_t *data, size_t len, BOOL keyFrame,
                                uint16_t dx, uint16_t dy, uint16_t dw, uint16_t dh) {
@@ -284,9 +424,10 @@ static void rdp_on_keyframe_request(void *ud) {
                                  keyFrame ? true : false, dx, dy, dw, dh);
     };
     [_encoder start];
-    rdp_verbose("H.264 encoder started at %u kbps", kDefaultBitrate);
+    rdp_verbose("H.264 encoder started at %u kbps", _bitrateKbps);
 
     _capture = [[ScreenCapture alloc] initWithDisplayID:displayID];
+    _capture.maxFps = _maxFps;
     _capture.frameHandler = ^(IOSurfaceRef surface, uint32_t fw, uint32_t fh,
                                CGRect dirty) {
         (void)fw; (void)fh;
@@ -366,18 +507,26 @@ static void rdp_on_keyframe_request(void *ud) {
      * SYSPTR_DEFAULT arrow above, which is always visible. Re-enable once the
      * pointer encoding is fixed (likely switch to 24bpp XOR + 1bpp AND mask). */
     const char *curShapes = getenv("RDP_CURSOR_SHAPES");
-    if (curShapes && strcmp(curShapes, "1") == 0) {
+    /* A MACRDPX client draws alpha pointers properly, so it gets real shapes. */
+    BOOL wantShapes = (curShapes && strcmp(curShapes, "1") == 0) ||
+                      (_mrxCaps & MRX_CAP_CURSOR_ALPHA);
+    if (curShapes && strcmp(curShapes, "0") == 0) wantShapes = NO;
+    if (wantShapes) {
         _cursor = [[CursorCapture alloc] init];
         _cursor.handler = ^(const uint8_t *bgra, uint32_t cw, uint32_t ch,
                             uint16_t hotX, uint16_t hotY) {
             rdp_peer_send_cursor_shape(weak.peer, bgra, cw, ch, hotX, hotY);
         };
         [_cursor start];
-        rdp_info("cursor-shape streaming ON (RDP_CURSOR_SHAPES=1)");
+        rdp_info("cursor-shape streaming ON (%s)",
+                 (_mrxCaps & MRX_CAP_CURSOR_ALPHA) ? "MACRDPX client" : "RDP_CURSOR_SHAPES=1");
     } else {
         rdp_info("cursor-shape streaming OFF (default) — client draws the system "
                  "arrow; set RDP_CURSOR_SHAPES=1 to stream real Mac cursor shapes");
     }
+
+    /* A MACRDPX HELLO that arrived before activation takes effect now. */
+    [self startMrxFeatures];
 }
 
 - (void)disconnect {
@@ -404,6 +553,12 @@ static void rdp_on_keyframe_request(void *ud) {
     [_cursor stop];
     [_capture stop];
     [_encoder stop];
+    if (_mrxSink) {
+        os_unfair_lock_lock(&_mrxSink->lock);
+        _mrxSink->peer = NULL;
+        os_unfair_lock_unlock(&_mrxSink->lock);
+        dispatch_async(dispatch_get_main_queue(), ^{ [InputInjector setInputSourceObserver:nil]; });
+    }
     if (_audioSink) {
         os_unfair_lock_lock(&_audioSink->lock);
         _audioSink->peer = NULL;           /* no more sends into the dying peer */

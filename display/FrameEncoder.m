@@ -52,6 +52,17 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
 }
 
 - (uint32_t)width  { return _w; }
+- (uint32_t)targetBitrateKbps { return _bitrateKbps; }
+
+- (void)setTargetBitrateKbps:(uint32_t)kbps {
+    if (kbps == 0 || kbps == _bitrateKbps) return;
+    _bitrateKbps = kbps;
+    if (_session) {
+        VTSessionSetProperty(_session, kVTCompressionPropertyKey_AverageBitRate,
+                             (__bridge CFTypeRef)@((int32_t)(kbps * 1000)));
+        rdp_info("H.264 bit rate now %u kbps", kbps);
+    }
+}
 - (uint32_t)height { return _h; }
 
 - (BOOL)start {

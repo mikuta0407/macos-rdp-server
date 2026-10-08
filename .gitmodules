@@ -1,0 +1,3 @@
+[submodule "external/macrdpx"]
+	path = external/macrdpx
+	url = git@github.com:mikuta0407/macrdpx.git
