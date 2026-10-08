@@ -301,8 +301,9 @@ static void rdp_on_clipboard(void *ud, const uint8_t *data, size_t len,
                  (int)m->u.hello.name_length, m->u.hello.name ?: "", m->u.hello.version,
                  m->u.hello.caps, _mrxCaps);
         char name[128];
-        snprintf(name, sizeof name, "macos-rdp-server; macOS %s",
-                 NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String ?: "?");
+        NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion;
+        snprintf(name, sizeof name, "macos-rdp-server %s; macOS %ld.%ld.%ld", MACOS_RDP_VERSION,
+                 (long)v.majorVersion, (long)v.minorVersion, (long)v.patchVersion);
         mrx_message r = { .type = MRX_MSG_HELLO };
         r.u.hello.version = MRX_PROTOCOL_VERSION;
         r.u.hello.role = MRX_ROLE_SERVER;
