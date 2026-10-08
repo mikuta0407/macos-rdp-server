@@ -87,6 +87,11 @@ else()
                           ${WINPR_LINK_LIBRARIES})
 endif()
 
+# ── macrdpx (Mac RDP eXtensions, git submodule) ─────────────────────────
+# The MACRDPX static channel protocol shared with mRemote. `git submodule
+# update --init` fetches it.
+add_subdirectory(external/macrdpx EXCLUDE_FROM_ALL)
+
 # ── Target ────────────────────────────────────────────────────────────────
 add_executable(macos-rdp-daemon
     logging/RDPLog.c
@@ -98,6 +103,7 @@ add_executable(macos-rdp-daemon
     daemon/AutoUpdate.m
     daemon/FileProvider/RDPFileProvider.m
     protocol/RDPPeer.c
+    protocol/RDPMacrdpx.c
     protocol/RDPWebDAV.c
     protocol/RDPDriveMount.m
     display/VirtualDisplay.m
@@ -120,6 +126,7 @@ target_include_directories(macos-rdp-daemon PRIVATE
 )
 
 target_link_libraries(macos-rdp-daemon PRIVATE
+    macrdpx
     ${FREERDP_LINK_LIBS}
     "-framework Foundation"
     "-framework CoreGraphics"

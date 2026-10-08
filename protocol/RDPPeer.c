@@ -228,6 +228,7 @@ static void context_free(freerdp_peer *peer, rdpContext *ctx) {
     if (c->rdpsnd) { rdpsnd_server_context_free(c->rdpsnd);  c->rdpsnd = NULL; }
     /* Audio input (MS-RDPEAI) — close and release the ObjC object. */
     if (c->audioInput) { rdp_audio_input_close(c->audioInput); c->audioInput = NULL; }
+    rdp_peer_close_macrdpx(c);
     /* Close rdpdr raw WTS channel (opened when RDP_RDPDR_ENABLED=1). */
     if (c->rdpdrChannel && c->rdpdrChannel != INVALID_HANDLE_VALUE) {
         WTSVirtualChannelClose(c->rdpdrChannel);
@@ -718,6 +719,9 @@ static BOOL peer_post_connect(freerdp_peer *peer) {
      * channel list, WTSVirtualChannelOpen returns NULL and we log + continue. */
     rdp_peer_open_rdpdr(peer);
 
+    /* MACRDPX: Mac RDP eXtensions, joined only by Mac-aware clients. */
+    rdp_peer_open_macrdpx(peer);
+
     /* Audio. Advertise raw PCM stereo 16-bit at the standard rates mstsc
      * expects (48000 / 44100 / 22050). We DELIBERATELY offer only raw PCM, no
      * compressed codecs (AAC/ADPCM/GSM): our SendSamples feeds raw PCM, so a
@@ -964,6 +968,9 @@ bool rdp_peer_run_once(freerdp_peer *peer) {
     /* RDPDR static VC event (only when RDP_RDPDR_ENABLED=1 and channel open). */
     if (ctx->rdpdrEvent) events[nCount++] = ctx->rdpdrEvent;
 
+    /* MACRDPX static VC event (only when the client joined the channel). */
+    if (ctx->mrxEvent) events[nCount++] = ctx->mrxEvent;
+
     /* AUDIO_INPUT channel event (only when RDP_AUDIO_INPUT=1 and channel open). */
     HANDLE aiEvent = rdp_audio_input_event(ctx->audioInput);
     if (aiEvent) events[nCount++] = aiEvent;
@@ -1039,6 +1046,12 @@ bool rdp_peer_run_once(freerdp_peer *peer) {
     if (ok && ctx->rdpdrEvent &&
         WaitForSingleObject(ctx->rdpdrEvent, 0) == WAIT_OBJECT_0) {
         rdp_peer_pump_rdpdr(peer);
+    }
+
+    /* Drain MACRDPX messages (input, stream config) from a Mac client. */
+    if (ok && ctx->mrxEvent &&
+        WaitForSingleObject(ctx->mrxEvent, 0) == WAIT_OBJECT_0) {
+        rdp_peer_pump_macrdpx(peer);
     }
 
     /* Drain AUDIO_INPUT DATA PDUs and play on Mac speaker (RDP_AUDIO_INPUT=1).

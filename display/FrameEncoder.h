@@ -30,6 +30,9 @@ typedef void (^FrameEncoderOutputBlock)(const uint8_t *data, size_t len,
  * so the first frame the client receives must be a self-contained keyframe — a
  * P-frame referencing never-sent frames is undecodable and renders black. */
 - (void)forceKeyframe;
+/* Change the target bit rate of a running session (kbit/s). */
+- (void)setTargetBitrateKbps:(uint32_t)kbps;
+@property (nonatomic, readonly) uint32_t targetBitrateKbps;
 - (void)stop;
 
 @end

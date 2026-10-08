@@ -33,6 +33,7 @@
 @property (nonatomic, assign) IOSurfaceRef lastSurface;
 @property (nonatomic, strong) dispatch_source_t heartbeat;
 @property (nonatomic, assign) uint64_t lastHeartbeatFrameCount;
+@property (nonatomic, strong) SCStreamConfiguration *config;
 @end
 
 @implementation ScreenCapture
@@ -40,6 +41,7 @@
 - (instancetype)initWithDisplayID:(CGDirectDisplayID)did {
     if ((self = [super init])) {
         _displayID    = did;
+        _maxFps       = 30;
         _captureQueue = dispatch_queue_create("com.macosrdp.capture",
                                               DISPATCH_QUEUE_SERIAL);
     }
@@ -47,6 +49,21 @@
 }
 
 - (BOOL)isCapturing { return _capturing; }
+
+- (void)setMaxFps:(uint32_t)fps {
+    if (fps < 1) fps = 1;
+    if (fps > 120) fps = 120;
+    if (fps == _maxFps) return;
+    _maxFps = fps;
+    SCStream *stream = _stream;
+    SCStreamConfiguration *cfg = _config;
+    if (!stream || !cfg) return;
+    cfg.minimumFrameInterval = CMTimeMake(1, (int32_t)fps);
+    [stream updateConfiguration:cfg completionHandler:^(NSError *e) {
+        if (e) rdp_error("frame rate change failed: %s", e.localizedDescription.UTF8String ?: "?");
+        else   rdp_info("capture frame rate now %u fps", fps);
+    }];
+}
 
 - (void)setLastSurface:(IOSurfaceRef)surface {
     if (_lastSurface == surface) return;
@@ -96,7 +113,7 @@
         cfg.width                = width;
         cfg.height               = height;
         cfg.pixelFormat          = kCVPixelFormatType_32BGRA;
-        cfg.minimumFrameInterval = CMTimeMake(1, 30);   /* cap ~30 fps (RDP-sane) */
+        cfg.minimumFrameInterval = CMTimeMake(1, (int32_t)self_.maxFps);   /* default 30 */
         cfg.queueDepth           = 5;
         /* Show the macOS cursor composited into the capture by default, so the user
          * sees the real Mac pointer (I-beam, resize, beachball, etc.). Configurable
@@ -121,6 +138,7 @@
             return;
         }
         self_.stream = stream;
+        self_.config = cfg;
 
         [stream startCaptureWithCompletionHandler:^(NSError *startErr) {
             if (startErr) {
@@ -210,6 +228,7 @@
         [_stream stopCaptureWithCompletionHandler:^(NSError *e) { (void)e; }];
         _stream = nil;
     }
+    _config = nil;
     self.lastSurface = NULL;  /* releases */
 }
 

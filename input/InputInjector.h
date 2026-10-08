@@ -1,6 +1,7 @@
 #pragma once
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#include <macrdpx/macrdpx.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -33,6 +34,10 @@ NS_ASSUME_NONNULL_BEGIN
 #define RDP_MAC_KBTYPE_ANSI 40
 #define RDP_MAC_KBTYPE_ISO  41
 #define RDP_MAC_KBTYPE_JIS  42
+
+/* Told on the main thread when the Mac's selected keyboard input source changes
+ * (and once when set, with the current one). */
+typedef void (^InputSourceObserver)(BOOL asciiCapable, NSString *_Nullable sourceID);
 
 @interface InputInjector : NSObject
 
@@ -68,6 +73,20 @@ NS_ASSUME_NONNULL_BEGIN
  * by the JIS Hankaku/Zenkaku toggle). Text Input Sources must be queried on the
  * main thread, so call this once from the main thread before its run loop runs. */
 + (void)startInputSourceMonitor;
+
+/* Main thread. nil stops reporting. */
++ (void)setInputSourceObserver:(nullable InputSourceObserver)observer;
+
+/* ── MACRDPX native input (a Mac client; see external/macrdpx) ─────────────
+ * Keys arrive as kVK codes with the client's exact modifier flags, the pointer
+ * with the client's click count, scrolling with pixel deltas and phases. These
+ * bypass every scan-code translation above (keyboard type detection, JIS
+ * toggles, Ctrl/Cmd swap): the client is a Mac, so its keys are already Mac keys. */
+- (void)setMacKeyboardType:(uint32_t)keyboardType;
+- (void)injectMacKey:(const mrx_key *)key;
+- (void)syncMacModifiers:(uint64_t)modifierFlags;
+- (void)injectMacPointer:(const mrx_pointer *)pointer;
+- (void)injectMacScroll:(const mrx_scroll *)scroll;
 
 @end
 

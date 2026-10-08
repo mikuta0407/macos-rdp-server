@@ -11,6 +11,7 @@
 #include <freerdp/server/rdpsnd.h>
 #include <freerdp/channels/wtsvc.h>
 #include <winpr/wtsapi.h>
+#include <macrdpx/macrdpx.h>
 
 typedef struct rdp_peer_context RDPPeerContext;
 typedef struct RDPWebDAVServer  RDPWebDAVServer;
@@ -21,6 +22,9 @@ typedef void (*RDPPeerMouseCallback)(void *userdata, uint16_t flags, uint16_t x,
 typedef void (*RDPPeerClipboardCallback)(void *userdata, const uint8_t *data, size_t len, uint32_t format);
 typedef void (*RDPPeerReadyCallback)(void *userdata, uint32_t width, uint32_t height, uint32_t colorDepth);
 typedef void (*RDPPeerKeyframeCallback)(void *userdata);
+/* One decoded MACRDPX message (see external/macrdpx). Strings in it borrow
+ * from the channel buffer and are valid only during the call. */
+typedef void (*RDPPeerMacrdpxCallback)(void *userdata, const mrx_message *message);
 
 /* IRP async completion callback type.  Invoked on the peer run-loop thread
  * when a PAKID_CORE_DEVICE_IOCOMPLETION arrives for the matching CompletionId.
@@ -43,6 +47,8 @@ typedef struct {
      * becomes ready (frames encoded earlier were discarded, so the first sent
      * frame must be a keyframe) or when a delta arrives before any keyframe. */
     RDPPeerKeyframeCallback  onKeyframeRequest;
+    /* MACRDPX channel messages, on the peer run-loop thread. */
+    RDPPeerMacrdpxCallback   onMacrdpx;
     void *userdata;
 } RDPPeerCallbacks;
 
@@ -120,6 +126,11 @@ struct rdp_peer_context {
      * a non-owning reference — lifetime is managed by context_free calling
      * rdp_peer_close_audio_input(), which releases the ObjC object. */
     void                *audioInput;   /* __strong RDPAudioInput * under ARC */
+    /* MACRDPX (Mac RDP eXtensions) static VC. Non-NULL only when the client
+     * joined the channel (mRemote in its macOS mode) and RDP_MACRDPX != 0. */
+    HANDLE               mrxChannel;
+    HANDLE               mrxEvent;
+    bool                 mrxBroken;      /* a malformed message: ignore the rest */
 };
 
 freerdp_peer *rdp_peer_create(int fd, const RDPPeerCallbacks *callbacks);
@@ -263,3 +274,19 @@ void rdp_drive_mount_placeholder(const char *driveName, uint32_t deviceId);
 void rdp_peer_send_cursor_shape(freerdp_peer *peer,
                                 const uint8_t *bgra, uint32_t w, uint32_t h,
                                 uint16_t hotX, uint16_t hotY);
+
+/*
+ * MACRDPX channel (protocol/RDPMacrdpx.c).
+ *
+ * rdp_peer_open_macrdpx  - open the static channel if the client joined it.
+ *   Called from peer_post_connect. Returns false (harmlessly) for clients
+ *   that don't know it, which is every standard RDP client.
+ * rdp_peer_pump_macrdpx  - decode pending messages and hand each to
+ *   callbacks.onMacrdpx. Run loop, under xportLock.
+ * rdp_peer_send_macrdpx  - send one message; takes xportLock. Any thread.
+ * rdp_peer_close_macrdpx - context teardown.
+ */
+bool rdp_peer_open_macrdpx(freerdp_peer *peer);
+void rdp_peer_pump_macrdpx(freerdp_peer *peer);
+bool rdp_peer_send_macrdpx(freerdp_peer *peer, const mrx_message *message);
+void rdp_peer_close_macrdpx(RDPPeerContext *ctx);
