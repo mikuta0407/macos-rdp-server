@@ -111,6 +111,7 @@ add_executable(macos-rdp-daemon
     display/FrameEncoder.m
     display/CursorCapture.m
     input/InputInjector.m
+    input/GestureSynth.m
     input/ClipboardSync.m
     audio/AudioCapture.m
     audio/AudioInput.m

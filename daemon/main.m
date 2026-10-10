@@ -8,6 +8,7 @@
 #import "daemon/RDPServer.h"
 #import "daemon/RDPSession.h"
 #import "daemon/AutoUpdate.h"
+#import "input/GestureSynth.h"
 #import "input/InputInjector.h"
 #define RDP_LOG_COMPONENT "main"
 #include "logging/RDPLog.h"
@@ -49,7 +50,8 @@ static void print_usage(const char *prog) {
         "Usage: %s [options]\n"
         "  --port <n>            TCP port to listen on (default: 3389)\n"
         "  --log-level <l>       error|info|verbose|debug (default: info)\n"
-        "  --check-permissions   report Screen Recording + Accessibility state, then exit\n",
+        "  --check-permissions   report Screen Recording + Accessibility state, then exit\n"
+        "  --gesture-probe ...   post one trackpad gesture (or `listen`), then exit\n",
         prog);
 }
 
@@ -72,6 +74,8 @@ int main(int argc, char *argv[]) {
                 int lvl = rdp_log_level_from_string(argv[++i]);
                 if (lvl >= 0) rdp_log_set_level((RDPLogLevel)lvl);
                 else { fprintf(stderr, "Unknown log level '%s'\n", argv[i]); return 1; }
+            } else if (strcmp(argv[i], "--gesture-probe") == 0) {
+                return gs_probe_main(argc - i - 1, argv + i + 1);
             } else if (strcmp(argv[i], "--check-permissions") == 0) {
                 return check_permissions();
             } else if (strcmp(argv[i], "--help") == 0) {

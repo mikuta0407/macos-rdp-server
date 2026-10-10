@@ -24,6 +24,7 @@ mRemote client.
 | Stream | Server defaults (`RDP_MAX_FPS`, `RDP_BITRATE_KBPS`) | The client chooses frame rate and bit rate, and may change them mid-session (e.g. Wi-Fi → cellular); the server reports what it applied |
 | Input source | — | The server reports its keyboard input source (ASCII or a Japanese/Chinese/Korean input mode) |
 | Cursor | System arrow (shapes off by default) | Real cursor shapes, 32-bit with alpha, at the display's pixel scale |
+| Gestures | — | Pinch, rotate and smart zoom reach the app under the pointer as a trackpad's own gestures; three- and four-finger swipes can drive the Dock's swipes (Spaces, Mission Control) following the fingers |
 
 Display control (MS-RDPEDISP) and HiDPI are **not** extensions. On the main
 display (the default), every client that resizes its window gets the stream
@@ -43,6 +44,17 @@ and a HiDPI virtual display at 150 % or more.
    channel. `RDPSession` hands them to `InputInjector`'s `injectMac*` methods,
    which post CGEvents with the client's own flags, bypassing every scan-code
    translation.
+
+Gestures (`input/GestureSynth.m`) are posted as the CGEvents a Multi-Touch
+trackpad produces. Their event types and fields are not public API: pinch,
+rotate, smart zoom and swipes between pages were checked on macOS 26; the
+Dock's swipes are read from the event's fields up to macOS 26 and from an
+attached IOHIDEvent from macOS 27 (`RDP_DOCK_SWIPE=fields|hid` overrides).
+In a virtual machine without a trackpad the Dock ignored them, so a client
+can send those swipes as their shortcuts (⌃←/⌃→/⌃↑/⌃↓) instead.
+`macos-rdp-daemon --gesture-probe magnify 0.5` (or `rotate`, `smart-zoom`,
+`nav left`, `dock-v -1`, `listen 10`) posts one gesture from the daemon's
+own Accessibility grant, for checking a macOS release.
 
 `RDP_MACRDPX=0` disables the channel. With `RDP_LOG_LEVEL=debug` every message
 is logged (`rx key`, `tx stream-status`, ...).

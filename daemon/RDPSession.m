@@ -25,7 +25,7 @@ static const uint32_t kDefaultMaxFps  = 30;
 /* What this server offers a MACRDPX client (external/macrdpx). */
 static const mrx_caps kServerMrxCaps = MRX_CAP_MAC_KEYS | MRX_CAP_POINTER |
     MRX_CAP_PRECISE_SCROLL | MRX_CAP_STREAM_CONFIG | MRX_CAP_INPUT_SOURCE |
-    MRX_CAP_CURSOR_ALPHA;
+    MRX_CAP_CURSOR_ALPHA | MRX_CAP_GESTURES;
 
 static uint32_t env_u32(const char *name, uint32_t dflt) {
     const char *v = getenv(name);
@@ -353,6 +353,9 @@ static void rdp_on_clipboard(void *ud, const uint8_t *data, size_t len,
         break;
     case MRX_MSG_SCROLL:
         if (_mrxCaps & MRX_CAP_PRECISE_SCROLL) [_injector injectMacScroll:&m->u.scroll];
+        break;
+    case MRX_MSG_GESTURE:
+        if (_mrxCaps & MRX_CAP_GESTURES) [_injector injectMacGesture:&m->u.gesture];
         break;
     default:
         rdp_verbose("MACRDPX %s ignored on the server", mrx_message_type_name(m->type));

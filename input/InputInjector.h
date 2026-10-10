@@ -91,6 +91,9 @@ typedef void (^InputSourceObserver)(BOOL asciiCapable, NSString *_Nullable sourc
 - (void)syncMacModifiers:(uint64_t)modifierFlags;
 - (void)injectMacPointer:(const mrx_pointer *)pointer;
 - (void)injectMacScroll:(const mrx_scroll *)scroll;
+/* Pinch, rotate, smart zoom and Dock swipes, posted as a trackpad's own
+ * gesture events at the pointer (input/GestureSynth.h). */
+- (void)injectMacGesture:(const mrx_gesture *)gesture;
 
 @end
 

@@ -9,6 +9,7 @@
 #import <syslog.h>
 #define RDP_LOG_COMPONENT "input"
 #include "logging/RDPLog.h"
+#import "input/GestureSynth.h"
 
 /* ── Scan code → macOS virtual key code ──────────────────────────────────
  *
@@ -865,11 +866,70 @@ static int64_t cg_momentum_phase(uint8_t ns) {
     }
     CGEventSetIntegerValueField(ev, kCGScrollWheelEventScrollPhase, cg_scroll_phase(sc->phase));
     CGEventSetIntegerValueField(ev, kCGScrollWheelEventMomentumPhase, cg_momentum_phase(sc->momentum_phase));
+    /* NSEvent.isDirectionInvertedFromDevice ("natural" scrolling). */
+    CGEventSetIntegerValueField(ev, 137, (sc->flags & MRX_SCROLL_FLAG_INVERTED_FROM_DEVICE) ? 1 : 0);
     CGEventSetFlags(ev, (CGEventFlags)sc->modifier_flags);
+    BOOL gesture = pixel && sc->phase != MRX_PHASE_NONE && sc->momentum_phase == MRX_PHASE_NONE;
+    if (gesture && (sc->phase & MRX_PHASE_BEGAN)) {
+        /* Fingers down before they move, as a trackpad reports them: what
+         * lets an app start tracking a swipe. */
+        CGEventRef may = CGEventCreateScrollWheelEvent2(_source, kCGScrollEventUnitPixel, 2, 0, 0, 0);
+        if (may) {
+            CGEventSetIntegerValueField(may, kCGScrollWheelEventIsContinuous, 1);
+            CGEventSetIntegerValueField(may, kCGScrollWheelEventScrollPhase, kCGScrollPhaseMayBegin);
+            CGEventSetIntegerValueField(may, 137, (sc->flags & MRX_SCROLL_FLAG_INVERTED_FROM_DEVICE) ? 1 : 0);
+            CGEventPost(kCGSessionEventTap, may);
+            CFRelease(may);
+        }
+        gs_post_scroll_gesture(0, 0, 0x80 /* kIOHIDEventPhaseMayBegin */);
+    }
     CGEventPost(kCGSessionEventTap, ev);
     CFRelease(ev);
+    if (gesture) {
+        uint32_t phase = (sc->phase & MRX_PHASE_BEGAN) ? GS_PHASE_BEGAN
+            : (sc->phase & MRX_PHASE_ENDED) ? GS_PHASE_ENDED
+            : (sc->phase & MRX_PHASE_CANCELLED) ? GS_PHASE_CANCELLED
+            : (sc->phase & MRX_PHASE_MAY_BEGIN) ? 0x80 : GS_PHASE_CHANGED;
+        gs_post_scroll_gesture(dx, dy, phase);
+    }
     /* A cancelled gesture has no momentum to carry the remainder into. */
     if (sc->phase & MRX_PHASE_CANCELLED) _scrollRemX = _scrollRemY = 0;
+}
+
+/* NSEvent.Phase bits -> IOHIDEventPhaseBits. */
+static uint32_t gs_phase(uint8_t ns) {
+    if (ns & MRX_PHASE_BEGAN)     return GS_PHASE_BEGAN;
+    if (ns & MRX_PHASE_ENDED)     return GS_PHASE_ENDED;
+    if (ns & MRX_PHASE_CANCELLED) return GS_PHASE_CANCELLED;
+    return GS_PHASE_CHANGED;
+}
+
+- (void)injectMacGesture:(const mrx_gesture *)g {
+    rdp_debug("mac gesture kind=%u phase=0x%x value=%.4f velocity=%.3f",
+              g->kind, g->phase, g->value, g->velocity);
+    uint32_t phase = gs_phase(g->phase);
+    switch (g->kind) {
+    case MRX_GESTURE_MAGNIFY:
+        gs_post_magnify(g->value, phase);
+        break;
+    case MRX_GESTURE_ROTATE:
+        gs_post_rotate(g->value, phase);
+        break;
+    case MRX_GESTURE_SMART_ZOOM:
+        gs_post_smart_zoom();
+        break;
+    case MRX_GESTURE_DOCK_HORIZONTAL:
+        /* The Dock's horizontal progress is positive as the fingers move
+         * left, as the wire's is. */
+        gs_post_dock_swipe(GS_DOCK_HORIZONTAL, g->value, phase, g->velocity);
+        break;
+    case MRX_GESTURE_DOCK_VERTICAL:
+        /* The Dock's vertical progress is negative as the fingers move up. */
+        gs_post_dock_swipe(GS_DOCK_VERTICAL, -g->value, phase, -g->velocity);
+        break;
+    default:
+        break;
+    }
 }
 
 @end
