@@ -156,10 +156,12 @@ static uint64_t fnv1a(const uint8_t *p, size_t n, uint64_t seed) {
                                        hotX:outHotX hotY:outHotY];
     }
 
-    uint8_t *raw = malloc(dataSize);
+    uint8_t *raw = calloc(1, dataSize);
     if (!raw) return NULL;
 
-    int    rdDataSize = 0, rowBytes = 0, depth = 0, comps = 0, bpc = 0;
+    /* rdDataSize goes in as the buffer's size: with 0 the call succeeds and
+     * copies nothing, and the cursor sent was whatever malloc returned. */
+    int    rdDataSize = (int)dataSize, rowBytes = 0, depth = 0, comps = 0, bpc = 0;
     CGRect rect = CGRectZero;
     CGPoint hot = CGPointZero;
     CGError ge = CGSGetGlobalCursorData(cid, raw, &rdDataSize, &rowBytes,
@@ -189,11 +191,11 @@ static uint64_t fnv1a(const uint8_t *p, size_t n, uint64_t seed) {
         CGDataProviderCreateWithData(NULL, raw, (size_t)rowBytes * srcH, NULL);
     if (!provider) { CGColorSpaceRelease(cs); free(raw); return NULL; }
 
-    /* CGS global cursor data is 32-bit ARGB, premultiplied, big-endian component
-     * order; PremultipliedFirst + ByteOrder32Big matches it. */
+    /* CGS global cursor data is premultiplied R,G,B,A in memory (a black
+     * fill pixel reads 00 00 00 ff), so PremultipliedLast + ByteOrder32Big. */
     CGImageRef src = CGImageCreate(
         srcW, srcH, 8, 32, (size_t)rowBytes, cs,
-        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Big,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big,
         provider, NULL, false, kCGRenderingIntentDefault);
     CGDataProviderRelease(provider);
     CGColorSpaceRelease(cs);
@@ -211,8 +213,7 @@ static uint64_t fnv1a(const uint8_t *p, size_t n, uint64_t seed) {
 
 /* Render a CGImage into a freshly malloc'd 32-bit BGRA premultiplied,
  * top-left-origin, tightly-packed buffer, scaled down to kMaxCursorDim. The
- * destination context is top-left origin (flipped), so no manual row flip is
- * needed. Returns NULL on failure. Caller frees. */
+ * destination context's memory is top-down, so no row flip is needed. Returns NULL on failure. Caller frees. */
 - (uint8_t *)renderCGImage:(CGImageRef)src
                   srcWidth:(uint32_t)srcW srcHeight:(uint32_t)srcH
                    hotSpot:(CGPoint)hot
@@ -244,10 +245,9 @@ static uint64_t fnv1a(const uint8_t *p, size_t n, uint64_t seed) {
     CGColorSpaceRelease(cs);
     if (!cgctx) { free(buf); return NULL; }
 
-    /* CG draws bottom-up by default. Flip the context vertically so the image
-     * lands top-left-origin in `buf` (RDP/our convention). */
-    CGContextTranslateCTM(cgctx, 0, h);
-    CGContextScaleCTM(cgctx, 1.0, -1.0);
+    /* No flip: a bitmap context's first row in memory is the top of what
+     * it draws, so an image drawn upright already lands top-down in `buf`
+     * (RDP/our convention). A flip here sent the cursor upside down. */
     CGContextSetInterpolationQuality(cgctx, kCGInterpolationHigh);
     CGContextDrawImage(cgctx, CGRectMake(0, 0, w, h), src);
     CGContextRelease(cgctx);
