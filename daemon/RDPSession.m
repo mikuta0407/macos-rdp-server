@@ -11,6 +11,7 @@
 #import "audio/AudioCapture.h"
 #import "audio/AudioRedirect.h"
 #import <os/lock.h>
+#import <stdatomic.h>
 #import <unistd.h>
 #include <freerdp/freerdp.h>
 #define RDP_LOG_COMPONENT "session"
@@ -39,11 +40,21 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
 
 /* Hand-off point between the audio capture thread and the peer. Audio starts
  * asynchronously (see setupDisplayAndMediaForWidth:), so the capture callback can
- * outlive the peer; teardown detaches the peer here before destroying it. */
+ * outlive the peer; teardown detaches the peer here before destroying it.
+ *
+ * The capture callback runs on CoreAudio's IO thread, and sending takes the
+ * transport lock, which the encoder holds while a frame goes out. On Wi-Fi a
+ * large frame held it long enough for the IO thread to miss its deadlines, and
+ * the tap dropped what it had captured (delivery fell to 17-37k frames/sec of
+ * 48k: audible gaps). So the callback only copies; a serial queue sends. */
 @interface RDPAudioSink : NSObject {
 @public
     os_unfair_lock lock;
     freerdp_peer *peer;
+    dispatch_queue_t sendQueue;
+    /* Frames copied but not yet sent. Past a second of backlog the link is
+     * stalled, and older sound is worth less than a bounded queue. */
+    _Atomic uint32_t pendingFrames;
 }
 @end
 @implementation RDPAudioSink
@@ -597,14 +608,27 @@ static void rdp_on_keyframe_request(void *ud) {
         RDPAudioSink *sink = [RDPAudioSink new];
         sink->lock = OS_UNFAIR_LOCK_INIT;
         sink->peer = _peer;
+        sink->sendQueue = dispatch_queue_create("com.macosrdp.session.audio-send",
+                                                DISPATCH_QUEUE_SERIAL);
+        atomic_init(&sink->pendingFrames, 0);
         _audioSink = sink;
         _audio = [[AudioCapture alloc] init];
         _audio.captureBlock = ^(const int16_t *samples, uint32_t frameCount) {
             /* No per-buffer logging here: buffers arrive ~100x/sec and flooded the
              * log. AudioCapture itself logs a throttled frame total. */
-            os_unfair_lock_lock(&sink->lock);
-            if (sink->peer) rdp_peer_send_audio(sink->peer, samples, frameCount);
-            os_unfair_lock_unlock(&sink->lock);
+            if (atomic_load(&sink->pendingFrames) > 48000) return;
+            size_t bytes = (size_t)frameCount * 2 * sizeof(int16_t);
+            int16_t *copy = (int16_t *)malloc(bytes);
+            if (!copy) return;
+            memcpy(copy, samples, bytes);
+            atomic_fetch_add(&sink->pendingFrames, frameCount);
+            dispatch_async(sink->sendQueue, ^{
+                os_unfair_lock_lock(&sink->lock);
+                if (sink->peer) rdp_peer_send_audio(sink->peer, copy, frameCount);
+                os_unfair_lock_unlock(&sink->lock);
+                atomic_fetch_sub(&sink->pendingFrames, frameCount);
+                free(copy);
+            });
         };
         AudioCapture *audio = _audio;
         dispatch_async(_audioQueue, ^{
