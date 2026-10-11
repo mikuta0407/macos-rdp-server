@@ -517,8 +517,12 @@ static UINT cliprdr_client_format_data_request(
  *   "44100" (default) → prefer 44100 stereo 16-bit PCM
  *   "48000"           → prefer 48000
  *   "auto"            → no preference; take the first compatible client format */
-static uint32_t rdp_preferred_audio_rate(void) {
+static uint32_t rdp_preferred_audio_rate(const RDPPeerContext *ctx) {
     const char *env = getenv("RDP_AUDIO_RATE");
+    /* A MACRDPX client (it joined the channel at connect, before rdpsnd)
+     * plays what it is told at the rate it is told: 48000 is the tap's own
+     * rate, so the audio goes out unresampled. */
+    if ((!env || !*env) && ctx->mrxChannel) return 48000;
     if (!env || !*env)               return 44100;  /* default */
     if (strcmp(env, "auto") == 0)    return 0;
     long v = strtol(env, NULL, 10);
@@ -570,7 +574,7 @@ static void rdpsnd_activated(RdpsndServerContext *rdpsnd) {
      * Two passes: first try to match the preferred rate; if the client offers
      * no compatible format at that rate, fall back to the first compatible
      * format of any rate so audio still works (just possibly shifted). */
-    const uint32_t preferred = rdp_preferred_audio_rate();
+    const uint32_t preferred = rdp_preferred_audio_rate(ctx);
     rdp_info("audio rate preference: %s (RDP_AUDIO_RATE)",
              preferred ? (preferred == 44100 ? "44100" :
                           preferred == 48000 ? "48000" : "22050") : "auto");

@@ -49,6 +49,18 @@ static inline int16_t clampF32(float f) {
     int16_t  *_pcmBuf;
     size_t    _pcmBufFrames;
     double   _hostTicksToSeconds;
+    /* Sample-rate conversion, when the client plays at another rate than the
+     * tap's: Core Audio's band-limited converter. Linear interpolation, used
+     * before, let through aliasing only 13-32 dB below 6-15 kHz content - the
+     * graininess heard on cymbals and sibilants. Built on the IO thread the
+     * first time a rate needs it (once a session, so the one allocation is
+     * accepted there); the stereo float buffers are its input and output. */
+    AudioConverterRef _converter;
+    uint32_t  _converterRate;
+    float    *_stereoIn;
+    float    *_stereoOut;
+    size_t    _stereoInFrames;
+    size_t    _stereoOutFrames;
 }
 @property (nonatomic, assign) AudioObjectID       tapID;        /* process tap            */
 @property (nonatomic, assign) AudioObjectID       aggID;        /* private aggregate dev  */
@@ -60,12 +72,37 @@ static inline int16_t clampF32(float f) {
 @property (nonatomic, assign) double              srcSampleRate;
 @property (nonatomic, assign) uint32_t            srcChannels;
 
-/* Linear-resampler carry state (previous tail sample per channel + phase). */
-@property (nonatomic, assign) double              resamplePhase;
-@property (nonatomic, assign) float               lastL;
-@property (nonatomic, assign) float               lastR;
-@property (nonatomic, assign) BOOL                haveLast;
 @end
+
+/* What the converter's input callback hands over: one IO buffer, once. */
+typedef struct {
+    const float *frames;
+    UInt32 count;
+} AudioCaptureConverterInput;
+
+/* Ends a FillComplexBuffer call when the IO buffer is used up; the converter
+ * keeps what it has not output yet for the next call. */
+static const OSStatus kConverterInputDone = 'done';
+
+static OSStatus audio_converter_input(AudioConverterRef converter, UInt32 *ioPackets,
+                                      AudioBufferList *data,
+                                      AudioStreamPacketDescription **descriptions,
+                                      void *userData) {
+    (void)converter; (void)descriptions;
+    AudioCaptureConverterInput *input = (AudioCaptureConverterInput *)userData;
+    if (input->count == 0) {
+        *ioPackets = 0;
+        return kConverterInputDone;
+    }
+    if (*ioPackets > input->count) *ioPackets = input->count;
+    data->mNumberBuffers = 1;
+    data->mBuffers[0].mNumberChannels = kRDPChannels;
+    data->mBuffers[0].mData = (void *)input->frames;
+    data->mBuffers[0].mDataByteSize = *ioPackets * kRDPChannels * sizeof(float);
+    input->frames += (size_t)*ioPackets * kRDPChannels;
+    input->count -= *ioPackets;
+    return noErr;
+}
 
 static OSStatus audio_io_proc(AudioObjectID device, const AudioTimeStamp *now,
                                const AudioBufferList *inputData,
@@ -219,8 +256,7 @@ static OSStatus audio_io_proc(AudioObjectID device, const AudioTimeStamp *now,
     }
     _srcSampleRate = asbd.mSampleRate;
     _srcChannels   = asbd.mChannelsPerFrame;
-    _resamplePhase = 0.0;
-    _haveLast      = NO;
+    [self disposeConverter];    /* built for the previous tap's rate */
     _diagFrames       = 0;
     _diagLastHostTime = 0;
     rdp_info("tap input format: %.0f Hz, %u ch, %u bits, flags 0x%x",
@@ -249,7 +285,7 @@ static OSStatus audio_io_proc(AudioObjectID device, const AudioTimeStamp *now,
 
     uint32_t outRate = atomic_load_explicit(&_outRate, memory_order_relaxed);
     if (_srcSampleRate != (double)outRate)
-        rdp_info("tap rate %.0f Hz != output %u Hz — linear-resampling",
+        rdp_info("tap rate %.0f Hz != output %u Hz — resampling",
                  _srcSampleRate, (unsigned)outRate);
 
     /* 6. Register IO proc + start. */
@@ -301,6 +337,51 @@ static OSStatus audio_io_proc(AudioObjectID device, const AudioTimeStamp *now,
 #endif
     _capturing = NO;
     if (_pcmBuf) { free(_pcmBuf); _pcmBuf = NULL; _pcmBufFrames = 0; }
+}
+
+- (void)dealloc {
+    [self disposeConverter];
+    free(_pcmBuf);
+}
+
+- (void)disposeConverter {
+    if (_converter) { AudioConverterDispose(_converter); _converter = NULL; }
+    _converterRate = 0;
+    free(_stereoIn);  _stereoIn = NULL;  _stereoInFrames = 0;
+    free(_stereoOut); _stereoOut = NULL; _stereoOutFrames = 0;
+}
+
+/* A converter from the tap's rate to outRate, stereo float both sides. */
+- (BOOL)prepareConverterTo:(uint32_t)outRate {
+    if (_converter && _converterRate == outRate) return YES;
+    [self disposeConverter];
+    AudioStreamBasicDescription in = {
+        .mSampleRate = _srcSampleRate,
+        .mFormatID = kAudioFormatLinearPCM,
+        .mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+        .mBytesPerPacket = kRDPChannels * sizeof(float),
+        .mFramesPerPacket = 1,
+        .mBytesPerFrame = kRDPChannels * sizeof(float),
+        .mChannelsPerFrame = kRDPChannels,
+        .mBitsPerChannel = 32,
+    };
+    AudioStreamBasicDescription out = in;
+    out.mSampleRate = outRate;
+    OSStatus err = AudioConverterNew(&in, &out, &_converter);
+    if (err != noErr || !_converter) {
+        rdp_error("AudioConverterNew %.0f -> %u Hz failed (status %d)",
+                  _srcSampleRate, (unsigned)outRate, (int)err);
+        _converter = NULL;
+        return NO;
+    }
+    UInt32 complexity = kAudioConverterSampleRateConverterComplexity_Mastering;
+    AudioConverterSetProperty(_converter, kAudioConverterSampleRateConverterComplexity,
+                              sizeof(complexity), &complexity);
+    UInt32 quality = kAudioConverterQuality_Max;
+    AudioConverterSetProperty(_converter, kAudioConverterSampleRateConverterQuality,
+                              sizeof(quality), &quality);
+    _converterRate = outRate;
+    return YES;
 }
 
 /* Convert one IO-proc buffer (float32, _srcChannels, _srcSampleRate) into
@@ -357,7 +438,7 @@ static OSStatus audio_io_proc(AudioObjectID device, const AudioTimeStamp *now,
      * per IO proc call at the aggregate device's buffer size). */
     uint32_t maxOut = (_srcSampleRate == outRate)
         ? inFrames
-        : (uint32_t)((inFrames + 1) * ratio) + 2;
+        : (uint32_t)((inFrames + 1) * ratio) + 64;
     if (maxOut > _pcmBufFrames) {
         int16_t *nb = (int16_t *)realloc(_pcmBuf,
                                           (size_t)maxOut * kRDPChannels *
@@ -379,44 +460,35 @@ static OSStatus audio_io_proc(AudioObjectID device, const AudioTimeStamp *now,
         return;
     }
 
-    /* Linear resample to output-rate stereo. Generate output frames by walking a
-     * fractional read position across the input block, carrying the tail
-     * sample between callbacks for continuity. */
-    double phase = _resamplePhase;      /* fractional input index in [0,inFrames) */
-    float prevL = _lastL, prevR = _lastR;
-    BOOL haveLast = _haveLast;
-    uint32_t outCount = 0;
-
-    while (phase < inFrames && outCount < maxOut) {
-        uint32_t idx = (uint32_t)phase;
-        double frac  = phase - (double)idx;
-
-        float curL, curR;
-        [self readFrame:in index:idx channels:srcCh outL:&curL outR:&curR];
-
-        float pL, pR;
-        if (idx == 0) {
-            if (haveLast) { pL = prevL; pR = prevR; }
-            else          { pL = curL; pR = curR; }
-        } else {
-            [self readFrame:in index:idx - 1 channels:srcCh outL:&pL outR:&pR];
-        }
-
-        float outL = (float)(pL + (curL - pL) * frac);
-        float outR = (float)(pR + (curR - pR) * frac);
-        pcm[outCount * 2 + 0] = clampF32(outL);
-        pcm[outCount * 2 + 1] = clampF32(outR);
-        outCount++;
-
-        phase += 1.0 / ratio;
+    /* Resample to output-rate stereo through the converter, which carries
+     * its filter state from one IO buffer to the next. */
+    if (![self prepareConverterTo:(uint32_t)outRate]) return;
+    if (inFrames > _stereoInFrames) {
+        float *nb = (float *)realloc(_stereoIn, (size_t)inFrames * kRDPChannels * sizeof(float));
+        if (!nb) return;
+        _stereoIn = nb; _stereoInFrames = inFrames;
     }
-
-    /* Carry phase remainder and the last input frame into the next callback. */
-    [self readFrame:in index:inFrames - 1 channels:srcCh outL:&prevL outR:&prevR];
-    _lastL = prevL; _lastR = prevR; _haveLast = YES;
-    _resamplePhase = phase - (double)inFrames;
-    if (_resamplePhase < 0) _resamplePhase = 0;
-
+    if (maxOut > _stereoOutFrames) {
+        float *nb = (float *)realloc(_stereoOut, (size_t)maxOut * kRDPChannels * sizeof(float));
+        if (!nb) return;
+        _stereoOut = nb; _stereoOutFrames = maxOut;
+    }
+    for (uint32_t f = 0; f < inFrames; f++)
+        [self readFrame:in index:f channels:srcCh
+                   outL:&_stereoIn[f * 2] outR:&_stereoIn[f * 2 + 1]];
+    AudioCaptureConverterInput input = { _stereoIn, inFrames };
+    UInt32 outCount = maxOut;
+    AudioBufferList outList = {
+        .mNumberBuffers = 1,
+        .mBuffers = {{ kRDPChannels, (UInt32)(maxOut * kRDPChannels * sizeof(float)), _stereoOut }},
+    };
+    OSStatus err = AudioConverterFillComplexBuffer(_converter, audio_converter_input, &input,
+                                                   &outCount, &outList, NULL);
+    if (err != noErr && err != kConverterInputDone) return;
+    for (uint32_t f = 0; f < outCount; f++) {
+        pcm[f * 2 + 0] = clampF32(_stereoOut[f * 2 + 0]);
+        pcm[f * 2 + 1] = clampF32(_stereoOut[f * 2 + 1]);
+    }
     if (outCount) cb(pcm, outCount);
 }
 
