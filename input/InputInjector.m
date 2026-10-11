@@ -919,13 +919,10 @@ static uint32_t gs_phase(uint8_t ns) {
         gs_post_smart_zoom();
         break;
     case MRX_GESTURE_DOCK_HORIZONTAL:
-        /* The Dock's horizontal progress is positive as the fingers move
-         * left, as the wire's is. */
         gs_post_dock_swipe(GS_DOCK_HORIZONTAL, g->value, phase, g->velocity);
         break;
     case MRX_GESTURE_DOCK_VERTICAL:
-        /* The Dock's vertical progress is negative as the fingers move up. */
-        gs_post_dock_swipe(GS_DOCK_VERTICAL, -g->value, phase, -g->velocity);
+        gs_post_dock_swipe(GS_DOCK_VERTICAL, g->value, phase, g->velocity);
         break;
     default:
         break;

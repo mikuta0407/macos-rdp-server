@@ -50,11 +50,16 @@ trackpad produces. Their event types and fields are not public API: pinch,
 rotate, smart zoom and swipes between pages were checked on macOS 26; the
 Dock's swipes are read from the event's fields up to macOS 26 and from an
 attached IOHIDEvent from macOS 27 (`RDP_DOCK_SWIPE=fields|hid` overrides).
-In a virtual machine without a trackpad the Dock ignored them, so a client
-can send those swipes as their shortcuts (⌃←/⌃→/⌃↑/⌃↓) instead.
+The IOHIDEvent form works on macOS 27.2, both axes in the wire's direction.
+The Dock completes every swipe that ends, however slow, and goes back on
+one that is cancelled, so the client decides and sends a swipe that should
+go back as cancelled. In a macOS 26 virtual machine without a trackpad the
+Dock ignored the fields form, so a client can send those swipes as their
+shortcuts (⌃←/⌃→/⌃↑/⌃↓) instead.
 `macos-rdp-daemon --gesture-probe magnify 0.5` (or `rotate`, `smart-zoom`,
-`nav left`, `dock-v -1`, `listen 10`) posts one gesture from the daemon's
-own Accessibility grant, for checking a macOS release.
+`nav left`, `dock-v 1` with progress positive as the fingers go left/up,
+`listen 10`) posts one gesture from the daemon's own Accessibility grant,
+for checking a macOS release; `GS_END=cancel` ends a dock swipe cancelled.
 
 `RDP_MACRDPX=0` disables the channel. With `RDP_LOG_LEVEL=debug` every message
 is logged (`rx key`, `tx stream-status`, ...).

@@ -195,16 +195,25 @@ void gs_post_dock_swipe(gs_dock_axis axis, double progress, uint32_t phase, doub
      * progress of the last event of a swipe, events ~16 ms apart. */
     double exitSpeed = velocity * 1.6;
     if (gs_dock_uses_hid()) {
+        /* The IOHIDEvent's horizontal progress is positive as the fingers
+         * move right, its vertical as they move up (seen on macOS 27.2). */
+        double sign = axis == GS_DOCK_HORIZONTAL ? -1 : 1;
         CGEventRef ev = CGEventCreate(NULL);
         if (!ev) return;
         CGEventSetType(ev, kTypeDockControl);
-        if (gs_attach_dock_hid(ev, axis, progress, phase, exitSpeed)) {
+        if (gs_attach_dock_hid(ev, axis, sign * progress, phase, sign * exitSpeed)) {
             CGEventPost(kCGSessionEventTap, ev);
             CFRelease(ev);
             return;
         }
         CFRelease(ev);
         /* No IOHIDEvent on this release: the fields are all there is. */
+    }
+    /* The fields' vertical progress is negative as the fingers move up
+     * (as Mac Mouse Fix documents it; not seen working in a VM). */
+    if (axis == GS_DOCK_VERTICAL) {
+        progress = -progress;
+        exitSpeed = -exitSpeed;
     }
     CGEventRef dock = CGEventCreate(NULL);
     CGEventRef gesture = CGEventCreate(NULL);
@@ -256,7 +265,9 @@ static void gs_probe_dock(gs_dock_axis axis, double total, int steps, double vel
         gs_post_dock_swipe(axis, total * i / steps, GS_PHASE_CHANGED, 0);
     }
     gs_sleep_ms(16);
-    gs_post_dock_swipe(axis, total, GS_PHASE_ENDED, velocity);
+    const char *end = getenv("GS_END");
+    gs_post_dock_swipe(axis, total, end && !strcmp(end, "cancel") ? GS_PHASE_CANCELLED : GS_PHASE_ENDED,
+                       velocity);
 }
 
 static CGEventRef gs_listen_cb(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, void *ud) {
