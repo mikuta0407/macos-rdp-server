@@ -75,7 +75,6 @@ jobs:
             desc "RDP server for macOS with JIS keyboard and Mac-to-Mac (MACRDPX) support"
             homepage "https://github.com/${repo}"
             url "https://github.com/${repo}/releases/download/${TAG}/${asset}"
-            version "${VERSION}"
             sha256 "${sha}"
             license "MIT"
 
