@@ -91,7 +91,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/freerdp-install
-          key: freerdp-${{ steps.ver.outputs.freerdp }}-universal-${{ steps.ver.outputs.openssl }}-v1
+          key: freerdp-${{ steps.ver.outputs.freerdp }}-universal-${{ steps.ver.outputs.openssl }}-v2-nojson
 
       - name: Build universal FreeRDP from fork
         if: steps.cache-freerdp.outputs.cache-hit != 'true'
@@ -109,7 +109,7 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET="14.0" \
             -DCMAKE_PREFIX_PATH="$OPENSSL_ROOT" \
             -DBUILD_SHARED_LIBS=OFF \
-            -DWITH_SERVER=ON -DWITH_PLATFORM_SERVER=OFF \
+            -DWITH_SERVER=ON -DWITH_PLATFORM_SERVER=OFF -DWITH_JSON_DISABLED=ON \
             -DWITH_CLIENT=OFF -DWITH_CLIENT_COMMON=OFF -DWITH_PROXY=OFF \
             -DWITH_SHADOW=OFF -DWITH_SAMPLE=OFF -DWITH_WINPR_TOOLS=OFF \
             -DWITH_FFMPEG=OFF -DWITH_SWSCALE=OFF -DWITH_DSP_FFMPEG=OFF \
