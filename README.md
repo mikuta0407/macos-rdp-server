@@ -15,7 +15,7 @@ A lightweight RDP server daemon for macOS Tahoe and later. This is a fork of [gr
 - **DriverKit HID extension** *(optional, requires Apple Developer account)* — injects input at the HID stack level, works at the login window and in secure input fields
 - **launchd integration** — a per-user LaunchAgent that starts when you log in and restarts on crash
 - **TLS encryption** — self-signed certificate generated on install; clients trust on first connect
-- **Follows the client's window** — display control (MS-RDPEDISP) resizes the virtual display, the stream and the GFX surface live; a client at 150 % scale or more (a Mac's Retina 200 %) gets a **HiDPI** virtual display, so text is rendered at the client's density. On the main display, a client that resizes gets the stream in the display's own shape, at Retina pixels for such a client
+- **Follows the client's window** — display control (MS-RDPEDISP) resizes the virtual display, the stream and the GFX surface live; a client at 150 % scale or more (a Mac's Retina 200 %) gets a **HiDPI** virtual display, so text is rendered at the client's density. On the main display, the Mac switches to the display mode closest to the client's size (in points, HiDPI for a Retina client) and goes back to its own when the session ends; the stream takes the display's shape, at Retina pixels for such a client
 - **Mac-to-Mac extensions (MACRDPX)** — a Mac client that joins the `MACRDPX` channel sends keys as Mac keys with exact modifiers (⌘ stays ⌘, Fn, left/right), the pointer with real click counts, pixel-precise trackpad scrolling with momentum, trackpad gestures (pinch, rotate, smart zoom, Dock swipes), and can choose the frame rate and bit rate mid-session. See [docs/MAC-CLIENTS.md](docs/MAC-CLIENTS.md). Every other client is plain RDP, unchanged
 
 ## Requirements
@@ -162,6 +162,7 @@ Settings are environment variables passed to `macos-rdp-install-user` (see
 | `RDP_MAX_FPS` | `30` | Frame-rate cap (1–120); a MACRDPX client may change it per session |
 | `RDP_BITRATE_KBPS` | `8000` | H.264 target bit rate; likewise per session for MACRDPX clients |
 | `RDP_DISPLAY_MODE` | `main` | `main` shows the Mac's main display; `virtual` gives each session a display of its own, sized to the client |
+| `RDP_MATCH_RESOLUTION` | `1` | On the main display: `1` switches the Mac's resolution to the mode closest to the client's; `0` leaves it as it is |
 | `RDP_HIDPI` | auto | `auto`: HiDPI virtual display at a client scale ≥ 150 %; `0` never; `1` always |
 | `RDP_DISP` | on | `0` disables display control (the desktop keeps its connect-time size) |
 | `RDP_MACRDPX` | on | `0` disables the Mac-to-Mac extensions channel |

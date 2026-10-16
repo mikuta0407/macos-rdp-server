@@ -107,6 +107,7 @@ add_executable(macos-rdp-daemon
     protocol/RDPWebDAV.c
     protocol/RDPDriveMount.m
     display/VirtualDisplay.m
+    display/MainDisplayMode.m
     display/ScreenCapture.m
     display/FrameEncoder.m
     display/CursorCapture.m

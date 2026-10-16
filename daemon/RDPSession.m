@@ -8,6 +8,7 @@
 #import "display/CursorCapture.h"
 #import "input/InputInjector.h"
 #import "input/ClipboardSync.h"
+#import "display/MainDisplayMode.h"
 #import "audio/AudioCapture.h"
 #import "audio/AudioRedirect.h"
 #import <os/lock.h>
@@ -67,6 +68,8 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
 @property (nonatomic, assign) freerdp_peer *peer;
 /* The session's own display, or nil while it shows the Mac's main display. */
 @property (nonatomic, strong) VirtualDisplay  *display;
+/* The main display's resolution, while it follows the client's. */
+@property (nonatomic, strong) MainDisplayMode *mainMode;
 /* The display the session captures and puts input on. */
 @property (nonatomic, assign) CGDirectDisplayID displayID;
 @property (nonatomic, strong) DisplayControl  *displayControl;
@@ -477,19 +480,31 @@ static void rdp_on_keyframe_request(void *ud) {
     _encoder = nil;
 }
 
+/* The main display takes the mode closest to the client's size: in points,
+ * and HiDPI for a Retina client. */
+- (BOOL)matchMainDisplayWidth:(uint32_t)w height:(uint32_t)h scale:(uint32_t)scale {
+    if (!_mainMode) return NO;
+    BOOL hidpi = [self wantsHiDPIForScale:scale];
+    double perPoint = hidpi && scale ? scale / 100.0 : 1.0;
+    return [_mainMode matchPointWidth:w / perPoint height:h / perPoint hiDPI:hidpi];
+}
+
 /* A display-control request from the client (window resized, scale changed):
  * the virtual display, the stream and the GFX surface all follow it. The main
- * display keeps its size, so a client that can resize gets the stream in the
- * main display's shape, at the density it asked for. */
+ * display changes to the mode closest to it, and the stream takes the main
+ * display's shape, at the density the client asked for. */
 - (void)applyLayoutWidth:(uint32_t)w height:(uint32_t)h scale:(uint32_t)scale {
     BOOL hidpi = [self wantsHiDPIForScale:scale];
+    BOOL modeChanged = NO;
     if (_display) {
         w = MIN(MAX(w, 200u), 7680u) & ~1u;
         h = MIN(MAX(h, 200u), 4320u) & ~1u;
     } else {
+        modeChanged = [self matchMainDisplayWidth:w height:h scale:scale];
         [self mainDisplayStreamSizeHiDPI:hidpi width:&w height:&h];
     }
-    if (w == _streamWidth && h == _streamHeight && (!_display || hidpi == _display.hiDPI)) return;
+    if (!modeChanged && w == _streamWidth && h == _streamHeight &&
+        (!_display || hidpi == _display.hiDPI)) return;
     rdp_info("resizing the desktop %ux%u -> %ux%u%s", _streamWidth, _streamHeight, w, h,
              hidpi ? " HiDPI" : "");
     [self stopMedia];
@@ -573,7 +588,13 @@ static void rdp_on_keyframe_request(void *ud) {
      * frame. A client that resizes gets the main display's shape then. */
     CGDirectDisplayID displayID = _display ? _display.displayID : CGMainDisplayID();
     _displayID = displayID;
-    if (!_display) rdp_info("showing the main display %u", displayID);
+    if (!_display) {
+        rdp_info("showing the main display %u", displayID);
+        if (MainDisplayMode.isEnabled) {
+            _mainMode = [[MainDisplayMode alloc] initWithDisplayID:displayID];
+            [self matchMainDisplayWidth:width height:height scale:scale];
+        }
+    }
 
     /* Wake the Mac + keep it awake for the whole session (replaces caffeinate),
      * and privacy-dim the BUILT-IN panel (brightness -> 0) so a bystander can't
@@ -739,6 +760,7 @@ static void rdp_on_keyframe_request(void *ud) {
     [_clipboard stop];
     [_displayControl stop];
     [_display destroy];
+    [_mainMode restore];
 
     if (_peer) { rdp_peer_destroy(_peer); _peer = NULL; }
     if (_fd >= 0) { close(_fd); _fd = -1; }
