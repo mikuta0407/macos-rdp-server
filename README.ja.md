@@ -2,7 +2,7 @@
 
 [English](README.md) | 日本語
 
-macOS Tahoe 以降向けの軽量な RDP サーバー daemon です。Windows のリモートデスクトップ、FreeRDP、Remmina など標準の RDP クライアントから、Windows 環境と同じような滑らかさで Mac に接続できます。
+macOS Tahoe 以降向けの軽量な RDP サーバー daemon です。[grioghar/macos-rdp-server](https://github.com/grioghar/macos-rdp-server) の fork で、日本語 / JIS キーボードへの対応と、Mac 同士の拡張（MACRDPX）を加えています。Windows のリモートデスクトップ、FreeRDP、Remmina など標準の RDP クライアントから、Windows 環境と同じような滑らかさで Mac に接続できます。
 
 ## 機能
 
@@ -21,7 +21,7 @@ macOS Tahoe 以降向けの軽量な RDP サーバー daemon です。Windows �
 ## 動作環境
 
 - macOS 14 Sonoma 以降
-- Homebrew（ソースからビルドする場合のみ。ビルド済みバイナリは実行時の依存がありません）
+- Homebrew（ソースからビルドする場合のみ。ビルド済みのバイナリは実行時の依存がありません）
 - Xcode Command Line Tools（ソースからビルドする場合のみ）
 
 ## 1 行でインストール
@@ -41,33 +41,33 @@ macOS Tahoe 以降向けの軽量な RDP サーバー daemon です。Windows �
 > 変わる cdhash ではなく署名に結びつけるので、許可が外れません。sudo は不要です。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/grioghar/macos-rdp-server/master/scripts/remote-install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/remote-install.sh | sudo bash
 ```
 
-GitHub Releases から、ビルド済みの最新の **universal バイナリ**（Intel と Apple Silicon の両方でネイティブに動く 1 つのファイル）をダウンロードします。Homebrew もコンパイルも不要で、実行時の依存もありません。リンクしているのは macOS のシステムフレームワークだけです。
+GitHub Releases から、ビルド済みの最新の **Apple Silicon 用**バイナリをダウンロードします。Homebrew もコンパイルも不要で、実行時の依存もありません。リンクしているのは macOS のシステムフレームワークだけです。Intel の Mac では、代わりにソースからビルドします（Homebrew がなければ入れます）。
 
 スクリプトは次のことをします。
-1. universal バイナリを `/usr/local/sbin/macos-rdp-daemon` にダウンロード
+1. バイナリを `/usr/local/sbin/macos-rdp-daemon` にダウンロード（Intel ではビルド）
 2. `/etc/macos-rdp/` に自己署名の TLS 証明書を作成
 3. ポート 3389 で launchd サービスを登録して起動
 4. IP アドレスと、必要な 2 つのプライバシー許可の手順を表示
 
-バイナリを直接ダウンロードすることもできます。
+バイナリを直接ダウンロードすることもできます（Apple Silicon）。
 ```bash
-sudo curl -fsSL https://github.com/grioghar/macos-rdp-server/releases/latest/download/macos-rdp-daemon \
+sudo curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/macos-rdp-daemon \
   -o /usr/local/sbin/macos-rdp-daemon && sudo chmod +x /usr/local/sbin/macos-rdp-daemon
 ```
 
 公開されているチェックサムで検証できます。
 ```bash
-curl -fsSL https://github.com/grioghar/macos-rdp-server/releases/latest/download/SHA256SUMS | shasum -c
+echo "$(curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/macos-rdp-daemon.sha256)  /usr/local/sbin/macos-rdp-daemon" | shasum -a 256 -c
 ```
 
 インストールしたら、RDP クライアントで Mac の IP アドレスに接続してください。
 
-> **再現可能なビルド**: リリースのバイナリは、ソースを固定した fork（FreeRDP と OpenSSL）だけから、
-> 静的リンクで、1 回の CI 実行の中でビルドしています。ビルド時にも実行時にも、パッケージマネージャーから
-> 取ってくるものはありません。[`.github/workflows/release.yml`](.github/workflows/release.yml) を見てください。
+> **バイナリのビルド方法**: `master` への push のたびに、CI がソースを固定した FreeRDP の fork から
+> 静的リンクでビルドし、最新のリリースとして公開します。
+> [`.github/workflows/ci.yml`](.github/workflows/ci.yml) を見てください。
 
 ## 手動でインストール
 
@@ -76,7 +76,7 @@ curl -fsSL https://github.com/grioghar/macos-rdp-server/releases/latest/download
 brew install freerdp cmake openssl pkgconf
 
 # 2. clone（macrdpx サブモジュールも一緒に）
-git clone --recurse-submodules https://github.com/grioghar/macos-rdp-server.git
+git clone --recurse-submodules https://github.com/mikuta0407/macos-rdp-server.git
 cd macos-rdp-server
 # 既存のチェックアウトなら: git submodule update --init
 
@@ -118,7 +118,7 @@ daemon の機能は、macOS の「プライバシーとセキュリティ」で�
 インストーラーが該当の設定画面を自動で開きます。ヘルパーを（もう一度）実行するには:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/grioghar/macos-rdp-server/master/scripts/grant-permissions.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/grant-permissions.sh | sudo bash
 ```
 
 ヘルパーがすること:

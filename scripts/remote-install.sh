@@ -1,10 +1,10 @@
 #!/bin/bash
 # macos-rdp-server one-line installer.
-# Usage: curl -fsSL https://raw.githubusercontent.com/grioghar/macos-rdp-server/master/scripts/remote-install.sh | sudo bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/remote-install.sh | sudo bash
 
 set -euo pipefail
 
-REPO="grioghar/macos-rdp-server"
+REPO="mikuta0407/macos-rdp-server"
 BINARY_DEST="/usr/local/sbin/macos-rdp-daemon"
 PLIST_DEST="/Library/LaunchDaemons/com.macosrdp.daemon.plist"
 RAW="https://raw.githubusercontent.com/$REPO/master"
@@ -25,15 +25,19 @@ log "macOS $(sw_vers -productVersion) · $(uname -m)"
 # destination dirs) up front so `install` can't fail on a missing parent.
 mkdir -p "$(dirname "$BINARY_DEST")" "$(dirname "$PLIST_DEST")"
 
-# ── Download pre-built universal binary from latest release ──────────────
+# ── Download the pre-built binary from the latest release ──────────────
 # The `|| true` keeps a rate-limited / offline API response from aborting the
 # script under `set -e` — an empty LATEST falls through to the source build.
 LATEST=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
          | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' || true)
 
-if [[ -n "$LATEST" ]]; then
+# The releases are built for Apple Silicon only; an Intel Mac builds from source.
+if [[ "$(uname -m)" != "arm64" ]]; then
+    warn "Release binaries are arm64 only — building from source"
+    FROM_RELEASE=false
+elif [[ -n "$LATEST" ]]; then
     BIN_URL="https://github.com/$REPO/releases/download/$LATEST/macos-rdp-daemon"
-    log "Downloading macos-rdp-daemon $LATEST (universal)..."
+    log "Downloading macos-rdp-daemon $LATEST (arm64)..."
     TMP=$(mktemp)
     if curl -fsSL "$BIN_URL" -o "$TMP"; then
         install -m 755 "$TMP" "$BINARY_DEST"
@@ -71,6 +75,7 @@ if [[ "${FROM_RELEASE:-false}" != "true" ]]; then
     [[ -d "$SRC/.git" ]] \
         && git -C "$SRC" pull --ff-only \
         || git clone "https://github.com/$REPO.git" "$SRC"
+    git -C "$SRC" submodule update --init --recursive   # external/macrdpx
 
     cmake -B "$SRC/build" -S "$SRC" \
         -DCMAKE_BUILD_TYPE=Release \

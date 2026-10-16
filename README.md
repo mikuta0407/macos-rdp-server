@@ -2,7 +2,7 @@
 
 English | [日本語](README.ja.md)
 
-A lightweight RDP server daemon for macOS Tahoe and later. Connect to your Mac from any standard RDP client — Windows Remote Desktop, FreeRDP, Remmina — with the same smoothness you'd expect from a Windows environment.
+A lightweight RDP server daemon for macOS Tahoe and later. This is a fork of [grioghar/macos-rdp-server](https://github.com/grioghar/macos-rdp-server) with Japanese/JIS keyboard support and the Mac-to-Mac extensions (MACRDPX). Connect to your Mac from any standard RDP client — Windows Remote Desktop, FreeRDP, Remmina — with the same smoothness you'd expect from a Windows environment.
 
 ## Features
 
@@ -21,7 +21,7 @@ A lightweight RDP server daemon for macOS Tahoe and later. Connect to your Mac f
 ## Requirements
 
 - macOS 14 Sonoma or later
-- Homebrew (only needed when building from source; pre-built binaries have no runtime dependencies)
+- Homebrew (only needed when building from source; the pre-built binary has no runtime dependencies)
 - Xcode Command Line Tools (source builds only)
 
 ## One-line install
@@ -42,33 +42,33 @@ A lightweight RDP server daemon for macOS Tahoe and later. Connect to your Mac f
 > grant to the signature rather than the cdhash that changes on every rebuild. No sudo.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/grioghar/macos-rdp-server/master/scripts/remote-install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/remote-install.sh | sudo bash
 ```
 
-Downloads the latest pre-built **universal binary** (a single file that runs natively on both Intel and Apple Silicon) from GitHub Releases. No Homebrew, no compilation, no runtime dependencies — the binary links only against macOS system frameworks.
+Downloads the latest pre-built binary for **Apple Silicon** from GitHub Releases. No Homebrew, no compilation, no runtime dependencies — the binary links only against macOS system frameworks. On an Intel Mac the script builds from source instead (Homebrew is installed if missing).
 
 The script will:
-1. Download the universal binary to `/usr/local/sbin/macos-rdp-daemon`
+1. Download the binary to `/usr/local/sbin/macos-rdp-daemon` (or build it, on Intel)
 2. Generate a self-signed TLS certificate at `/etc/macos-rdp/`
 3. Install and load the launchd service on port 3389
 4. Print your IP address and the two Privacy permission steps required
 
-Or download the binary directly:
+Or download the binary directly (Apple Silicon):
 ```bash
-sudo curl -fsSL https://github.com/grioghar/macos-rdp-server/releases/latest/download/macos-rdp-daemon \
+sudo curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/macos-rdp-daemon \
   -o /usr/local/sbin/macos-rdp-daemon && sudo chmod +x /usr/local/sbin/macos-rdp-daemon
 ```
 
 Verify the download against the published checksum:
 ```bash
-curl -fsSL https://github.com/grioghar/macos-rdp-server/releases/latest/download/SHA256SUMS | shasum -c
+echo "$(curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/macos-rdp-daemon.sha256)  /usr/local/sbin/macos-rdp-daemon" | shasum -a 256 -c
 ```
 
 After installation, open any RDP client and connect to your Mac's IP address.
 
-> **Reproducible builds.** Release binaries are built entirely from source-pinned forks
-> (FreeRDP and OpenSSL), statically linked, in a single CI pass. Nothing is pulled from a
-> package manager at build or run time. See [`.github/workflows/release.yml`](.github/workflows/release.yml).
+> **How the binary is built.** Every push to `master` is built by CI from a source-pinned
+> FreeRDP fork, statically linked, and published as the latest release. See
+> [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## Manual install
 
@@ -77,7 +77,7 @@ After installation, open any RDP client and connect to your Mac's IP address.
 brew install freerdp cmake openssl pkgconf
 
 # 2. Clone (with the macrdpx submodule)
-git clone --recurse-submodules https://github.com/grioghar/macos-rdp-server.git
+git clone --recurse-submodules https://github.com/mikuta0407/macos-rdp-server.git
 cd macos-rdp-server
 # an existing checkout: git submodule update --init
 
@@ -119,7 +119,7 @@ macOS gates the daemon's capabilities behind Privacy & Security:
 The installer opens the relevant panes automatically. To (re)run the helper:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/grioghar/macos-rdp-server/master/scripts/grant-permissions.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/grant-permissions.sh | sudo bash
 ```
 
 What it does:
