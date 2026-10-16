@@ -11,6 +11,10 @@
 #include "logging/RDPLog.h"
 #import "input/GestureSynth.h"
 
+/* kVK_ContextualMenu (0x6E) is only in recent SDKs; the key code itself is
+ * old, so name it here for older ones (CI's macos-14). */
+enum { kRDPKeyContextualMenu = 0x6E };
+
 /* ── Scan code → macOS virtual key code ──────────────────────────────────
  *
  * RDP sends PC/AT "set 1" scan codes (MS-RDPBCGR 2.2.8.1.1.3.1.1.1), with
@@ -115,7 +119,7 @@ static const ScanMapping kExtScanMappings[] = {
     {0x53, kVK_ForwardDelete},
     {0x5B, kVK_Command},             /* Left Windows */
     {0x5C, kVK_RightCommand},        /* Right Windows */
-    {0x5D, kVK_ContextualMenu},      /* Application / Menu */
+    {0x5D, kRDPKeyContextualMenu},   /* Application / Menu */
 };
 
 /* Extended scan codes of the consumer (media) keys → NX_KEYTYPE_*. macOS does
