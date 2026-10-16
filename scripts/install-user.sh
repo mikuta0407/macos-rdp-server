@@ -23,7 +23,7 @@
 #   RDP_LOG_LEVEL         error|info|verbose|debug                     (info)
 #   RDP_UPDATE_ENABLED    1 = self-update from GitHub releases         (0)
 #                         Off by default here: the updater replaces the binary
-#                         with the upstream release build, discarding a local build.
+#                         with the latest release build, discarding a local build.
 #   RDP_KEYBOARD_TYPE, RDP_ZENKAKU_TOGGLE, RDP_SWAP_CTRL_CMD, RDP_AUDIO_LOCAL,
 #   RDP_AUDIO_INPUT, RDP_RDPDR_ENABLED, RDP_CURSOR_SHAPES, RDP_SHARED_MODE,
 #   RDP_PRIVACY_BLANK, RDP_ALLOW_IDLE_SLEEP, RDP_MAX_FPS, RDP_BITRATE_KBPS,

@@ -91,7 +91,7 @@ scripts/install-user.sh build/macos-rdp-daemon
 ```
 
 `install-user.sh` turns the self-updater off by default (`RDP_UPDATE_ENABLED=0`)
-because it would replace your build with the upstream release. Settings such as
+because it would replace your build with the latest release. Settings such as
 `RDP_LOG_LEVEL`, `RDP_KEYBOARD_TYPE` or `RDP_SWAP_CTRL_CMD` can be passed in the
 environment when running it. Japanese / JIS keyboard notes: [docs/JAPANESE-SETUP.md](docs/JAPANESE-SETUP.md).
 

@@ -90,7 +90,7 @@ scripts/install-user.sh build/macos-rdp-daemon
 ```
 
 `install-user.sh` は自動更新を既定で無効にします（`RDP_UPDATE_ENABLED=0`）。
-有効だと、自分でビルドしたものが上流のリリースに置き換えられてしまうためです。
+有効だと、自分でビルドしたものが最新のリリースに置き換えられてしまうためです。
 `RDP_LOG_LEVEL`、`RDP_KEYBOARD_TYPE`、`RDP_SWAP_CTRL_CMD` などの設定は、実行時に
 環境変数で渡せます。日本語環境と JIS キーボードについては [docs/JAPANESE-SETUP.md](docs/JAPANESE-SETUP.md) を見てください。
 
