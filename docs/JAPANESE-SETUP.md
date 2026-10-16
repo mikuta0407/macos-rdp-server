@@ -41,8 +41,9 @@ launchctl bootout gui/$(id -u)/com.macosrdp.agent                      # 停止
 tail -f ~/Library/Logs/macos-rdp-agent.error.log                       # ログ
 ```
 
-**自動アップデートは既定で無効**です（`RDP_UPDATE_ENABLED=0`）。有効にすると上流
-（grioghar/macos-rdp-server）のリリースバイナリで置き換えられ、ここでの JIS 対応が消えます。
+**自動アップデートは既定で無効**です（`RDP_UPDATE_ENABLED=0`）。有効にすると、この fork
+（mikuta0407/macos-rdp-server）の最新リリースのバイナリで置き換えられ、自分でビルドしたものは消えます。
+Homebrew で入れた場合は、`brew upgrade` のあと `macos-rdp-install-user` を実行し直してください。
 
 ### プライバシー権限（初回のみ・手動）
 

@@ -13,7 +13,7 @@ A lightweight RDP server daemon for macOS Tahoe and later. This is a fork of [gr
 - **System audio redirection** — hear your Mac's audio through the RDP client
 - **Structured logging** — four levels (ERROR / INFO / VERBOSE / DEBUG), set via flag or env var
 - **DriverKit HID extension** *(optional, requires Apple Developer account)* — injects input at the HID stack level, works at the login window and in secure input fields
-- **launchd integration** — auto-starts at boot, restarts on crash
+- **launchd integration** — a per-user LaunchAgent that starts when you log in and restarts on crash
 - **TLS encryption** — self-signed certificate generated on install; clients trust on first connect
 - **Follows the client's window** — display control (MS-RDPEDISP) resizes the virtual display, the stream and the GFX surface live; a client at 150 % scale or more (a Mac's Retina 200 %) gets a **HiDPI** virtual display, so text is rendered at the client's density. On the main display, a client that resizes gets the stream in the display's own shape, at Retina pixels for such a client
 - **Mac-to-Mac extensions (MACRDPX)** — a Mac client that joins the `MACRDPX` channel sends keys as Mac keys with exact modifiers (⌘ stays ⌘, Fn, left/right), the pointer with real click counts, pixel-precise trackpad scrolling with momentum, trackpad gestures (pinch, rotate, smart zoom, Dock swipes), and can choose the frame rate and bit rate mid-session. See [docs/MAC-CLIENTS.md](docs/MAC-CLIENTS.md). Every other client is plain RDP, unchanged
@@ -24,88 +24,118 @@ A lightweight RDP server daemon for macOS Tahoe and later. This is a fork of [gr
 - Homebrew (for the Homebrew install, or when building from source; the pre-built binary has no runtime dependencies)
 - Xcode Command Line Tools (source builds only)
 
-## Homebrew
+## Install
+
+Run these as the user whose desktop you want to reach (over SSH is fine, as
+long as that user is logged in):
 
 ```bash
 brew install mikuta0407/apps/macos-rdp-server
 macos-rdp-install-user
 ```
 
-`macos-rdp-install-user` installs the daemon as a per-user LaunchAgent (see the
-note below). Run it again after every `brew upgrade`. Settings go in the
-environment, e.g. `RDP_KEYBOARD_TYPE=jis macos-rdp-install-user`. Then allow
-`~/.macos-rdp/bin/macos-rdp-daemon` under Screen Recording and Accessibility.
+`macos-rdp-install-user` copies the daemon to `~/.macos-rdp/bin/`, signs it
+with a stable self-signed certificate, creates the RDP TLS certificate, and
+loads a per-user LaunchAgent (`com.macosrdp.agent`) that listens on port 3389.
+No sudo.
 
-## One-line install
+Settings go in the environment when you run it, for example:
+
+```bash
+RDP_KEYBOARD_TYPE=jis RDP_PORT=3390 macos-rdp-install-user
+```
+
+Then grant the two permissions below once, and connect.
 
 > [!IMPORTANT]
-> **Screen capture requires the daemon to run in your GUI (Aqua) login session.** The
-> system LaunchDaemon installed by the commands in this section has no WindowServer
-> connection and will render a **black screen**. For a working, durable setup — one that
-> also keeps the Screen Recording / Accessibility permission valid across updates — use
-> the per-user installer instead, after obtaining the binary:
->
-> ```bash
-> scripts/install-user.sh /usr/local/sbin/macos-rdp-daemon   # or any path to the binary
-> ```
->
-> It runs the daemon as a per-user LaunchAgent (Aqua session → WindowServer → capture
-> works) and signs it with a stable self-signed certificate, so macOS pins the permission
-> grant to the signature rather than the cdhash that changes on every rebuild. No sudo.
+> **The daemon must run inside a logged-in GUI session.** Screen capture needs the
+> session's WindowServer connection, which is why it is a LaunchAgent and starts when
+> you log in. Nothing listens before a user logs in — for a Mac without a screen or a
+> keyboard, see [Headless operation](#headless-operation).
+
+## Privacy permissions
+
+| Permission | Required for |
+|---|---|
+| Screen Recording (*Screen & System Audio Recording*) | Capturing the screen, and the system audio |
+| Accessibility | Injecting keyboard and mouse input |
+
+Both are granted to `~/.macos-rdp/bin/macos-rdp-daemon`, not to the copy Homebrew
+installed. Granting has to be done on the Mac itself: without Screen Recording the RDP
+screen is black, so it cannot be done over RDP. Use a monitor, or connect once with
+macOS Screen Sharing.
+
+1. Connect once from an RDP client (the screen is still black). macOS asks on the Mac
+   whether `macos-rdp-daemon` may control the computer and record the screen; choose
+   **Open System Settings**.
+2. In **System Settings → Privacy & Security → Accessibility**, turn on
+   `macos-rdp-daemon`. Do the same under **Screen & System Audio Recording**.
+3. Reconnect. The desktop appears and the keyboard and mouse work.
+
+If `macos-rdp-daemon` is not in a list, add it: click **+**, press **⌘⇧G**, type
+`~/.macos-rdp/bin/` (a hidden folder, but typing the path opens it), select
+`macos-rdp-daemon`, and turn it on.
+
+The grant survives updates: `macos-rdp-install-user` re-signs every new build with
+the same certificate, and macOS pins the grant to that signature. About every 30 days
+macOS asks again whether the daemon may keep recording the screen.
+
+## Managing the agent
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/remote-install.sh | sudo bash
+launchctl print gui/$(id -u)/com.macosrdp.agent | grep -E 'state|pid'  # status
+launchctl kickstart -k gui/$(id -u)/com.macosrdp.agent                # restart
+launchctl bootout gui/$(id -u)/com.macosrdp.agent                     # stop (starts again at next login)
+tail -f ~/Library/Logs/macos-rdp-agent.error.log                      # log
 ```
 
-Downloads the latest pre-built **universal binary** (a single file that runs natively on both Intel and Apple Silicon) from GitHub Releases. No Homebrew, no compilation, no runtime dependencies — the binary links only against macOS system frameworks.
+Run these as the user, **without sudo**: the agent lives in the user's GUI domain.
 
-The script will:
-1. Download the universal binary to `/usr/local/sbin/macos-rdp-daemon`
-2. Generate a self-signed TLS certificate at `/etc/macos-rdp/`
-3. Install and load the launchd service on port 3389
-4. Print your IP address and the two Privacy permission steps required
+- **Change a setting**: run `macos-rdp-install-user` again with the new values. It
+  rewrites the LaunchAgent and reloads it. Only the variables you pass are written,
+  so pass every non-default one each time.
+- **Update**: `brew upgrade macos-rdp-server`, then `macos-rdp-install-user` again.
+- **Uninstall**:
 
-Or download the binary directly:
-```bash
-sudo curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/macos-rdp-daemon \
-  -o /usr/local/sbin/macos-rdp-daemon && sudo chmod +x /usr/local/sbin/macos-rdp-daemon
-```
+  ```bash
+  launchctl bootout gui/$(id -u)/com.macosrdp.agent
+  rm ~/Library/LaunchAgents/com.macosrdp.agent.plist
+  security delete-keychain ~/.macos-rdp/signing/macos-rdp.keychain-db
+  rm -rf ~/.macos-rdp
+  brew uninstall macos-rdp-server
+  ```
 
-Verify the download against the published checksum:
-```bash
-cd /usr/local/sbin && curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/SHA256SUMS | shasum -c --ignore-missing
-```
+| What | Where |
+|---|---|
+| Daemon (signed copy) | `~/.macos-rdp/bin/macos-rdp-daemon` |
+| RDP TLS certificate | `~/.macos-rdp/server.crt`, `server.key` |
+| Signing keychain | `~/.macos-rdp/signing/macos-rdp.keychain-db` |
+| LaunchAgent | `~/Library/LaunchAgents/com.macosrdp.agent.plist` |
+| Logs | `~/Library/Logs/macos-rdp-agent.error.log` (the daemon's log), `macos-rdp-agent.log` |
 
-After installation, open any RDP client and connect to your Mac's IP address.
+## Headless operation
 
-> **How the binary is built.** Each release (a `v*` tag) is built by CI from source-pinned
-> forks of FreeRDP and OpenSSL, statically linked, in a single pass. Nothing is pulled from
-> a package manager at build or run time. See [`.github/workflows/release.yml`](.github/workflows/release.yml).
+To use a Mac with no screen or keyboard attached, it has to be logged in after every
+restart, so turn on automatic login:
 
-## Manual install
+1. **Turn off FileVault** — macOS disables automatic login while FileVault is on.
+   (Keeping FileVault is possible if every restart is planned:
+   `sudo fdesetup authrestart` restarts once straight into the logged-in session. A
+   power cut still stops at the FileVault unlock screen.)
+2. **Turn on automatic login**: System Settings → Users & Groups → *Automatically log
+   in as*.
+3. **Start again after a power cut**: `sudo pmset -a autorestart 1`.
+4. **Install and grant the permissions** as above, with a monitor or Screen Sharing for
+   the one-time grant.
 
-```bash
-# 1. Install dependencies
-brew install freerdp cmake openssl pkgconf
+The daemon keeps the Mac from sleeping while it runs, and a Mac with no display gets a
+virtual one, so nothing else is needed for the screen.
 
-# 2. Clone (with the macrdpx submodule)
-git clone --recurse-submodules https://github.com/mikuta0407/macos-rdp-server.git
-cd macos-rdp-server
-# an existing checkout: git submodule update --init
-
-# 3. Build
-cmake -B build -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_PREFIX_PATH="$(brew --prefix freerdp);$(brew --prefix openssl)"
-cmake --build build
-
-# 4. Install as a per-user LaunchAgent (no sudo; see the note above)
-scripts/install-user.sh build/macos-rdp-daemon
-```
-
-`install-user.sh` turns the self-updater off by default (`RDP_UPDATE_ENABLED=0`)
-because it would replace your build with the latest release. Settings such as
-`RDP_LOG_LEVEL`, `RDP_KEYBOARD_TYPE` or `RDP_SWAP_CTRL_CMD` can be passed in the
-environment when running it. Japanese / JIS keyboard notes: [docs/JAPANESE-SETUP.md](docs/JAPANESE-SETUP.md).
+What this setup gives up: anyone with physical access to the Mac — a monitor or just a
+USB keyboard — gets the logged-in session, and without FileVault the disk is not
+encrypted with your password. Over the network, the RDP password is the only lock:
+keep port 3389 on your LAN or behind a VPN rather than open to the internet, and keep
+the client's certificate check on, so a changed certificate is noticed.
 
 ## Connect
 
@@ -115,57 +145,20 @@ environment when running it. Japanese / JIS keyboard notes: [docs/JAPANESE-SETUP
 | macOS Remote Desktop | App Store → Microsoft Remote Desktop → Add PC |
 | FreeRDP (CLI) | `xfreerdp /v:your-mac-ip /u:$(whoami) /cert:ignore` |
 | Remmina | New connection → protocol RDP → enter IP |
+| mRemote (iPad, iPhone, Mac) | Add a connection, and mark it as a Mac for the MACRDPX extensions |
 
 On first connect your client will show a certificate trust prompt — accept it. Subsequent connections skip this.
 
-## Privacy permissions
-
-macOS gates the daemon's capabilities behind Privacy & Security:
-
-| Permission | Required for |
-|---|---|
-| Screen Recording | `CGDisplayStream` frame capture |
-| Accessibility | `CGEventPost` keyboard & mouse injection |
-| Microphone | CoreAudio system audio tap |
-
-The installer opens the relevant panes automatically. To (re)run the helper:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/grant-permissions.sh | sudo bash
-```
-
-What it does:
-- **SIP enabled** (default): opens the **Screen Recording** and **Accessibility** panes. Click **+ → Cmd-Shift-G → `/usr/local/sbin`**, select `macos-rdp-daemon`, and toggle it on. (Once an RDP client has connected once, the binary registers itself in these lists, so you can just flip the switch.)
-- **SIP disabled**: grants both permissions directly by writing the system TCC database, then restarts the daemon — no clicking.
-
-> macOS does not allow any tool to grant Screen Recording / Accessibility programmatically while SIP is on — that restriction is the whole point of TCC. The helper makes the manual step as close to one click as the OS permits. Fully unattended granting requires [disabling SIP](docs/no-signing.md).
-
-After enabling both, restart the service:
-```bash
-sudo launchctl kickstart -k system/com.macosrdp.daemon
-```
-
 ## Configuration
 
-### Port
-
-Edit `/Library/LaunchDaemons/com.macosrdp.daemon.plist`:
-
-```bash
-sudo launchctl unload /Library/LaunchDaemons/com.macosrdp.daemon.plist
-# set --port <n> in ProgramArguments
-sudo launchctl load -w /Library/LaunchDaemons/com.macosrdp.daemon.plist
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--port` | `3389` | TCP port to listen on |
-| `--log-level` | `info` | Log verbosity (see below) |
-
-Stream and display settings, as environment variables of the LaunchAgent:
+Settings are environment variables passed to `macos-rdp-install-user` (see
+[Managing the agent](#managing-the-agent)).
 
 | Variable | Default | Description |
 |---|---|---|
+| `RDP_PORT` | `3389` | TCP port to listen on |
+| `RDP_LOG_LEVEL` | `info` | `error`, `info`, `verbose` or `debug` (see below) |
+| `RDP_KEYBOARD_TYPE` | auto | `jis`, `ansi`, `iso` or `auto`; see [docs/JAPANESE-SETUP.md](docs/JAPANESE-SETUP.md) |
 | `RDP_MAX_FPS` | `30` | Frame-rate cap (1–120); a MACRDPX client may change it per session |
 | `RDP_BITRATE_KBPS` | `8000` | H.264 target bit rate; likewise per session for MACRDPX clients |
 | `RDP_DISPLAY_MODE` | `main` | `main` shows the Mac's main display; `virtual` gives each session a display of its own, sized to the client |
@@ -173,6 +166,11 @@ Stream and display settings, as environment variables of the LaunchAgent:
 | `RDP_DISP` | on | `0` disables display control (the desktop keeps its connect-time size) |
 | `RDP_MACRDPX` | on | `0` disables the Mac-to-Mac extensions channel |
 | `RDP_CURSOR_SHAPES` | auto | `1` streams real cursor shapes to every client; `0` never. MACRDPX clients get them by default |
+| `RDP_UPDATE_ENABLED` | `0` | `1` lets the daemon replace itself with the latest release. Leave it off with Homebrew |
+
+`RDP_ZENKAKU_TOGGLE`, `RDP_SWAP_CTRL_CMD`, `RDP_AUDIO_LOCAL`, `RDP_AUDIO_INPUT`,
+`RDP_RDPDR_ENABLED`, `RDP_SHARED_MODE`, `RDP_PRIVACY_BLANK` and `RDP_ALLOW_IDLE_SLEEP`
+are passed through as well; [docs/TESTING.md](docs/TESTING.md) describes them.
 
 ## Logging
 
@@ -190,8 +188,6 @@ The daemon uses a four-level structured logger. Each log line includes a timesta
 [14:23:04.266] [INFO ] [session] session active for ::ffff:192.168.1.5
 ```
 
-### Log levels
-
 | Level | What it logs | Use when |
 |---|---|---|
 | `error` | Hard failures that stop a session or the daemon | Production; quiet machines |
@@ -201,52 +197,75 @@ The daemon uses a four-level structured logger. Each log line includes a timesta
 
 > **Warning:** `debug` logs every captured frame and input event. At 60fps this is ~3,600 lines/minute. Use it for short captures only.
 
-### Setting the log level
-
-**CLI flag** (one-off / manual runs):
 ```bash
-sudo macos-rdp-daemon --log-level verbose
-sudo macos-rdp-daemon --log-level debug
+RDP_LOG_LEVEL=verbose macos-rdp-install-user                     # change the level
+tail -f ~/Library/Logs/macos-rdp-agent.error.log                 # follow the log
+tail -f ~/Library/Logs/macos-rdp-agent.error.log | grep '\[ERROR\]'
+log stream --predicate 'process == "macos-rdp-daemon"' --level debug   # unified logging
 ```
 
-**Environment variable** (persists across restarts):
-```bash
-# Live, without editing the plist:
-sudo launchctl setenv RDP_LOG_LEVEL verbose
-sudo launchctl kickstart -k system/com.macosrdp.daemon
-
-# Or set it permanently in the launchd plist:
-# /Library/LaunchDaemons/com.macosrdp.daemon.plist
-# → EnvironmentVariables → RDP_LOG_LEVEL
-```
-
-### Reading logs
+## Build from source
 
 ```bash
-# Follow the daemon log file directly:
-tail -f /var/log/macos-rdp-daemon.error.log
+# 1. Install dependencies
+brew install freerdp cmake openssl pkgconf
 
-# Filter by level:
-tail -f /var/log/macos-rdp-daemon.error.log | grep '\[ERROR\]'
+# 2. Clone (with the macrdpx submodule)
+git clone --recurse-submodules https://github.com/mikuta0407/macos-rdp-server.git
+cd macos-rdp-server
+# an existing checkout: git submodule update --init
 
-# Via macOS unified logging (also shows os_log entries):
-log stream --predicate 'process == "macos-rdp-daemon"' --level debug
+# 3. Build
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH="$(brew --prefix freerdp);$(brew --prefix openssl)"
+cmake --build build
 
-# Historical logs in Console.app:
-# Filter by process name "macos-rdp-daemon"
+# 4. Install as a per-user LaunchAgent (no sudo)
+scripts/install-user.sh build/macos-rdp-daemon
 ```
 
-## Uninstall
+`scripts/install-user.sh` is what `macos-rdp-install-user` runs; it takes the same
+settings. Japanese / JIS keyboard notes: [docs/JAPANESE-SETUP.md](docs/JAPANESE-SETUP.md).
+
+> **How the release binary is built.** Each release (a `v*` tag) is built by CI from
+> source-pinned forks of FreeRDP and OpenSSL, statically linked, in a single pass, as a
+> universal binary. Nothing is pulled from a package manager at build or run time. See
+> [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
+## Other install methods (system LaunchDaemon)
+
+These are kept from upstream. They install the daemon as a **system LaunchDaemon**,
+which has no WindowServer connection and **renders a black screen**. Prefer the
+Homebrew install; with a binary from here, run
+`scripts/install-user.sh /usr/local/sbin/macos-rdp-daemon` instead of the daemon.
 
 ```bash
-sudo bash scripts/uninstall.sh
+# One-line installer: the universal binary to /usr/local/sbin, a TLS certificate in
+# /etc/macos-rdp/, and the LaunchDaemon on port 3389
+curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/remote-install.sh | sudo bash
+
+# Or just the binary, and its checksum
+sudo curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/macos-rdp-daemon \
+  -o /usr/local/sbin/macos-rdp-daemon && sudo chmod +x /usr/local/sbin/macos-rdp-daemon
+cd /usr/local/sbin && curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/SHA256SUMS | shasum -c --ignore-missing
+
+# Permission helper (with SIP disabled it writes the TCC database directly)
+curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/grant-permissions.sh | sudo bash
+
+# Managing it
+sudo launchctl kickstart -k system/com.macosrdp.daemon     # restart
+tail -f /var/log/macos-rdp-daemon.error.log                # log
+sudo bash scripts/uninstall.sh                             # uninstall
 ```
+
+Its settings live in `/Library/LaunchDaemons/com.macosrdp.daemon.plist`
+(`--port` in `ProgramArguments`, variables under `EnvironmentVariables`).
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                  macos-rdp-daemon (root)                 │
+│        macos-rdp-daemon (LaunchAgent, user session)      │
 │                                                          │
 │  TCP :3389 ──► RDPServer ──► RDPSession (per client)    │
 │                                   │                      │
@@ -256,7 +275,7 @@ sudo bash scripts/uninstall.sh
 │      (libfreerdp 3)        (CGVirtualDisplay) (CoreAudio HAL)
 │              │                   │                   │   │
 │         GFX Pipeline       ScreenCapture       AudioRedirect
-│       (H.264 AVC420)     (CGDisplayStream)     (RDPSND ch.)
+│       (H.264 AVC420)      (ScreenCaptureKit)   (RDPSND ch.)
 │              │                   │                        │
 │         InputInjector       FrameEncoder                  │
 │        (CGEventPost)      (VideoToolbox)                  │
