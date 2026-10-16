@@ -1,5 +1,7 @@
 # macos-rdp-server
 
+English | [日本語](README.ja.md)
+
 A lightweight RDP server daemon for macOS Tahoe and later. Connect to your Mac from any standard RDP client — Windows Remote Desktop, FreeRDP, Remmina — with the same smoothness you'd expect from a Windows environment.
 
 ## Features
@@ -14,7 +16,7 @@ A lightweight RDP server daemon for macOS Tahoe and later. Connect to your Mac f
 - **launchd integration** — auto-starts at boot, restarts on crash
 - **TLS encryption** — self-signed certificate generated on install; clients trust on first connect
 - **Follows the client's window** — display control (MS-RDPEDISP) resizes the virtual display, the stream and the GFX surface live; a client at 150 % scale or more (a Mac's Retina 200 %) gets a **HiDPI** virtual display, so text is rendered at the client's density. On the main display, a client that resizes gets the stream in the display's own shape, at Retina pixels for such a client
-- **Mac-to-Mac extensions (MACRDPX)** — a Mac client that joins the `MACRDPX` channel sends keys as Mac keys with exact modifiers (⌘ stays ⌘, Fn, left/right), the pointer with real click counts, pixel-precise trackpad scrolling with momentum, and can choose the frame rate and bit rate mid-session. See [docs/MAC-CLIENTS.md](docs/MAC-CLIENTS.md). Every other client is plain RDP, unchanged
+- **Mac-to-Mac extensions (MACRDPX)** — a Mac client that joins the `MACRDPX` channel sends keys as Mac keys with exact modifiers (⌘ stays ⌘, Fn, left/right), the pointer with real click counts, pixel-precise trackpad scrolling with momentum, trackpad gestures (pinch, rotate, smart zoom, Dock swipes), and can choose the frame rate and bit rate mid-session. See [docs/MAC-CLIENTS.md](docs/MAC-CLIENTS.md). Every other client is plain RDP, unchanged
 
 ## Requirements
 
