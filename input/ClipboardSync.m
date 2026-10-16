@@ -14,15 +14,26 @@
 @interface ClipboardSync ()
 @property (nonatomic, assign) NSInteger lastChangeCount;
 @property (nonatomic, strong) dispatch_source_t pollTimer;
+/* The poll and the writes from the client run here, one at a time: a poll
+ * that ran between a client write and the change count being noted would
+ * send the client's own text straight back to it. */
+@property (nonatomic, strong) dispatch_queue_t queue;
 @end
 
 @implementation ClipboardSync
 
+- (instancetype)init {
+    if ((self = [super init])) {
+        _queue = dispatch_queue_create("macosrdp.clipboard",
+            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    }
+    return self;
+}
+
 - (void)start {
     _lastChangeCount = NSPasteboard.generalPasteboard.changeCount;
 
-    _pollTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    _pollTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _queue);
     dispatch_source_set_timer(_pollTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
                               (uint64_t)(NSEC_PER_SEC / 4), NSEC_PER_SEC / 8); /* ~4 Hz */
     __weak typeof(self) weak = self;
@@ -49,6 +60,10 @@
 
     NSString *str = [pb stringForType:NSPasteboardTypeString];
     if (str) {
+        /* CF_UNICODETEXT has CRLF line ends; clients turn them back into
+         * their own. */
+        str = [[str stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
+                    stringByReplacingOccurrencesOfString:@"\n" withString:@"\r\n"];
         NSData *utf16 = [str dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
         if (utf16) {
             /* MS-RDPECLIP: CF_UNICODETEXT data is expected to be NUL-terminated.
@@ -73,6 +88,15 @@
 
 /* Windows -> Mac: client sent clipboard data; place it on the Mac pasteboard. */
 - (void)receiveFromClient:(const uint8_t *)data length:(size_t)len format:(uint32_t)format {
+    /* Async: this runs under the peer's transport lock, which the poll needs
+     * to send a format list. */
+    NSData *copy = [NSData dataWithBytes:data length:len];
+    dispatch_async(_queue, ^{
+        [self writeFromClient:(const uint8_t *)copy.bytes length:copy.length format:format];
+    });
+}
+
+- (void)writeFromClient:(const uint8_t *)data length:(size_t)len format:(uint32_t)format {
     NSPasteboard *pb = NSPasteboard.generalPasteboard;
     [pb clearContents];
     if (format == RDP_CB_FORMAT_UNICODETEXT || format == RDP_CB_FORMAT_TEXT) {
@@ -93,6 +117,8 @@
                                         encoding:NSUTF16LittleEndianStringEncoding];
         }
         if (str) {
+            /* A Mac's text has LF line ends; Windows sends CRLF. */
+            str = [str stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
             [pb setString:str forType:NSPasteboardTypeString];
             _lastChangeCount = pb.changeCount;  /* don't bounce it back to the client */
             rdp_verbose("clipboard: received %zu bytes from client (text)", len);
