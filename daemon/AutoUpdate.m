@@ -79,12 +79,6 @@ static NSString *signKeychain(void) {
             rdp_info("auto-update disabled (RDP_UPDATE_ENABLED=0)");
             return;
         }
-#if !defined(__arm64__)
-        /* The releases are arm64 builds; replacing an Intel binary with one
-         * would leave a daemon that cannot start. */
-        rdp_info("auto-update off: the releases are arm64 only");
-        return;
-#endif
         g_updater = [[AutoUpdate alloc] init];
         [g_updater run];
     });

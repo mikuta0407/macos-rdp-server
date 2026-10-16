@@ -1,0 +1,131 @@
+name: Update Homebrew Tap
+
+# Writes the latest (non-rc) release into mikuta0407/homebrew-apps as
+# Formula/macos-rdp-server.rb. Runs after "Build and Release" finishes (a
+# release event would fire before the assets are uploaded).
+on:
+  workflow_run:
+    workflows: ["Build and Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (default: the latest release)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Resolve tag
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' && 'yes' || '' }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag }}"
+          if [ -z "$tag" ] && [[ "${{ github.event.workflow_run.head_branch }}" == v* ]]; then
+            tag="${{ github.event.workflow_run.head_branch }}"
+          fi
+          latest="$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName 2>/dev/null || true)"
+          [ -n "$tag" ] || tag="$latest"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          if [[ "$tag" =~ -rc\.[0-9]+$ ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "::notice::$tag is a release candidate; tap not updated."
+          elif [ -z "$tag" ] || [ "$tag" != "$latest" ]; then
+            # An older tag's release must not roll the formula back.
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "::notice::$tag is not the latest release ($latest); tap not updated."
+          elif [ -z "$HAS_DEPLOY_KEY" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "::warning::HOMEBREW_TAP_DEPLOY_KEY is not set; tap not updated."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout tap
+        if: steps.meta.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: mikuta0407/homebrew-apps
+          ref: main
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Generate formula
+        if: steps.meta.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          repo="${{ github.repository }}"
+          asset="macos-rdp-server-${TAG}-macos-universal.tar.gz"
+          tmp="$(mktemp -d)"
+          gh release download "$TAG" --repo "$repo" --pattern "$asset" --dir "$tmp"
+          sha=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
+          mkdir -p tap/Formula
+          cat > tap/Formula/macos-rdp-server.rb <<EOF
+          class MacosRdpServer < Formula
+            desc "RDP server for macOS with JIS keyboard and Mac-to-Mac (MACRDPX) support"
+            homepage "https://github.com/${repo}"
+            url "https://github.com/${repo}/releases/download/${TAG}/${asset}"
+            version "${VERSION}"
+            sha256 "${sha}"
+            license "MIT"
+
+            depends_on macos: :sonoma
+
+            def install
+              libexec.install "macos-rdp-daemon", "install-user.sh"
+              bin.install_symlink libexec/"macos-rdp-daemon"
+              # The daemon runs from ~/.macos-rdp as a per-user LaunchAgent, signed
+              # with a stable certificate so the privacy permissions survive updates.
+              (bin/"macos-rdp-install-user").write <<~SH
+                #!/bin/bash
+                exec "#{opt_libexec}/install-user.sh" "#{opt_libexec}/macos-rdp-daemon" "\$@"
+              SH
+              doc.install "LICENSE", "README.md", "README.ja.md"
+            end
+
+            def caveats
+              <<~CAVEATS
+                Install (and, after every upgrade, reinstall) the per-user agent:
+                  macos-rdp-install-user
+                Settings are passed as environment variables, e.g.
+                  RDP_KEYBOARD_TYPE=jis macos-rdp-install-user
+                Then allow ~/.macos-rdp/bin/macos-rdp-daemon in System Settings >
+                Privacy & Security > Screen Recording and Accessibility.
+
+                To remove the agent:
+                  launchctl bootout gui/\$(id -u)/com.macosrdp.agent
+                  rm ~/Library/LaunchAgents/com.macosrdp.agent.plist
+                  rm -rf ~/.macos-rdp
+              CAVEATS
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/macos-rdp-daemon --version")
+            end
+          end
+          EOF
+          ruby -c tap/Formula/macos-rdp-server.rb
+
+      - name: Commit and push to the tap
+        if: steps.meta.outputs.skip == 'false'
+        working-directory: tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/macos-rdp-server.rb
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "macos-rdp-server ${{ steps.meta.outputs.version }}"
+            git push
+          fi

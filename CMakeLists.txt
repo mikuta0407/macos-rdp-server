@@ -165,12 +165,15 @@ set_property(TARGET macos-rdp-daemon PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 # RDP_RDPDR_ENABLED: compile-in the RDPDR drive-redirection channel handler.
 # Default OFF — the feature is new and unverified on hardware. Enable at
 # runtime with the env-var RDP_RDPDR_ENABLED=1 (checked at peer-connect time).
+# The release version; release.yml passes the tag without its "v".
+set(MACOS_RDP_VERSION "0.2.0" CACHE STRING "macos-rdp-daemon version")
+
 option(RDP_RDPDR_ENABLED
        "Include MS-RDPEFS (rdpdr) drive-redirection channel handler"
        OFF)
 
 target_compile_definitions(macos-rdp-daemon PRIVATE
-    MACOS_RDP_VERSION="0.1.6"
+    MACOS_RDP_VERSION="${MACOS_RDP_VERSION}"
     MACOS_RDP_BUILD_VERSION="${MACOS_RDP_BUILD_VERSION}"
     MACOS_RDP_VIRTUAL_DISPLAY=1
 )

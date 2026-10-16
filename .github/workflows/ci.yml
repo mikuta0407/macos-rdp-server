@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # release job (push to master) needs this to create releases
+  contents: read    # releases come from release.yml, on v* tags
 
 jobs:
   build-check:
@@ -120,56 +120,3 @@ jobs:
 
       - name: Compile menu-bar app
         run: ./gui/build.sh --compile-only
-
-  # ── Auto-update feed ──────────────────────────────────────────────────────
-  # On push to master only (NOT PRs), publish/refresh a GitHub Release tagged
-  # with the short SHA, carrying the freshly-built arm64 `macos-rdp-daemon`
-  # binary + a `macos-rdp-daemon.sha256` asset. The daemon's auto-updater polls
-  # releases/latest, compares tag_name to its stamped MACOS_RDP_BUILD_VERSION
-  # (== this SHA), and pulls when they differ. Idempotent: an existing tag is
-  # deleted and recreated so re-runs don't fail.
-  release-build:
-    name: Publish auto-update release
-    needs: build-check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    runs-on: macos-14
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6.0.3
-        with:
-          submodules: recursive
-
-      - name: Download arm64 binary artifact
-        uses: actions/download-artifact@v8.0.1
-        with:
-          name: macos-rdp-daemon-arm64
-          path: dist
-
-      - name: Prepare assets (sha256)
-        run: |
-          set -euo pipefail
-          chmod 755 dist/macos-rdp-daemon
-          # Bare 64-hex digest the daemon's regex/sha parser expects.
-          shasum -a 256 dist/macos-rdp-daemon | awk '{print $1}' > dist/macos-rdp-daemon.sha256
-          echo "sha256: $(cat dist/macos-rdp-daemon.sha256)"
-
-      - name: Publish release (tag = short SHA, marked latest)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.build-check.outputs.sha }}
-        run: |
-          set -euo pipefail
-          # Idempotent: drop any pre-existing release+tag for this SHA, then recreate.
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG exists — deleting to recreate"
-            gh release delete "$TAG" --yes --cleanup-tag || true
-          fi
-          gh release create "$TAG" \
-            --title "macos-rdp-daemon build $TAG" \
-            --notes "Automated auto-update build for commit ${GITHUB_SHA}. sha256: $(cat dist/macos-rdp-daemon.sha256)" \
-            --latest \
-            --target "$GITHUB_SHA" \
-            dist/macos-rdp-daemon \
-            dist/macos-rdp-daemon.sha256

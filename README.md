@@ -21,8 +21,20 @@ A lightweight RDP server daemon for macOS Tahoe and later. This is a fork of [gr
 ## Requirements
 
 - macOS 14 Sonoma or later
-- Homebrew (only needed when building from source; the pre-built binary has no runtime dependencies)
+- Homebrew (for the Homebrew install, or when building from source; the pre-built binary has no runtime dependencies)
 - Xcode Command Line Tools (source builds only)
+
+## Homebrew
+
+```bash
+brew install mikuta0407/apps/macos-rdp-server
+macos-rdp-install-user
+```
+
+`macos-rdp-install-user` installs the daemon as a per-user LaunchAgent (see the
+note below). Run it again after every `brew upgrade`. Settings go in the
+environment, e.g. `RDP_KEYBOARD_TYPE=jis macos-rdp-install-user`. Then allow
+`~/.macos-rdp/bin/macos-rdp-daemon` under Screen Recording and Accessibility.
 
 ## One-line install
 
@@ -45,15 +57,15 @@ A lightweight RDP server daemon for macOS Tahoe and later. This is a fork of [gr
 curl -fsSL https://raw.githubusercontent.com/mikuta0407/macos-rdp-server/master/scripts/remote-install.sh | sudo bash
 ```
 
-Downloads the latest pre-built binary for **Apple Silicon** from GitHub Releases. No Homebrew, no compilation, no runtime dependencies — the binary links only against macOS system frameworks. On an Intel Mac the script builds from source instead (Homebrew is installed if missing).
+Downloads the latest pre-built **universal binary** (a single file that runs natively on both Intel and Apple Silicon) from GitHub Releases. No Homebrew, no compilation, no runtime dependencies — the binary links only against macOS system frameworks.
 
 The script will:
-1. Download the binary to `/usr/local/sbin/macos-rdp-daemon` (or build it, on Intel)
+1. Download the universal binary to `/usr/local/sbin/macos-rdp-daemon`
 2. Generate a self-signed TLS certificate at `/etc/macos-rdp/`
 3. Install and load the launchd service on port 3389
 4. Print your IP address and the two Privacy permission steps required
 
-Or download the binary directly (Apple Silicon):
+Or download the binary directly:
 ```bash
 sudo curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/macos-rdp-daemon \
   -o /usr/local/sbin/macos-rdp-daemon && sudo chmod +x /usr/local/sbin/macos-rdp-daemon
@@ -61,14 +73,14 @@ sudo curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/d
 
 Verify the download against the published checksum:
 ```bash
-echo "$(curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/macos-rdp-daemon.sha256)  /usr/local/sbin/macos-rdp-daemon" | shasum -a 256 -c
+cd /usr/local/sbin && curl -fsSL https://github.com/mikuta0407/macos-rdp-server/releases/latest/download/SHA256SUMS | shasum -c --ignore-missing
 ```
 
 After installation, open any RDP client and connect to your Mac's IP address.
 
-> **How the binary is built.** Every push to `master` is built by CI from a source-pinned
-> FreeRDP fork, statically linked, and published as the latest release. See
-> [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+> **How the binary is built.** Each release (a `v*` tag) is built by CI from source-pinned
+> forks of FreeRDP and OpenSSL, statically linked, in a single pass. Nothing is pulled from
+> a package manager at build or run time. See [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 ## Manual install
 

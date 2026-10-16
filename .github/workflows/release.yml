@@ -124,12 +124,27 @@ jobs:
           cmake --build "$SRC/build" --parallel "$(sysctl -n hw.logicalcpu)"
           cmake --install "$SRC/build"
 
+      - name: Determine tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ github.event.inputs.tag }}"
+          fi
+          echo "name=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
       # ── Daemon: one universal cmake pass ──
+      # The build version is the tag: the self-updater compares it with the
+      # latest release's tag_name.
       - name: Build macos-rdp-daemon (universal)
         run: |
           set -euo pipefail
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DMACOS_RDP_VERSION="${{ steps.tag.outputs.version }}" \
+            -DMACOS_RDP_BUILD_VERSION="${{ steps.tag.outputs.name }}" \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET="14.0" \
             -DMACOS_RDP_STATIC=ON \
@@ -156,17 +171,25 @@ jobs:
           strip -x "$BIN"
           ls -lh "$BIN"
 
-      - name: Compute checksum
-        run: shasum -a 256 build/macos-rdp-daemon > build/SHA256SUMS
+      - name: Check the version stamp
+        run: build/macos-rdp-daemon --version | grep -F "${{ steps.tag.outputs.version }} (build ${{ steps.tag.outputs.name }})"
 
-      - name: Determine tag
-        id: tag
+      # The bare binary is what remote-install.sh and the self-updater fetch
+      # (with its .sha256); the tarball, with the per-user installer, is what
+      # the Homebrew formula installs.
+      - name: Package and checksum
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
         run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          pkg="build/pkg"
+          mkdir -p "$pkg"
+          cp build/macos-rdp-daemon scripts/install-user.sh LICENSE README.md README.ja.md "$pkg/"
+          tar -czf "build/macos-rdp-server-${TAG}-macos-universal.tar.gz" -C "$pkg" .
+          tar -tzf "build/macos-rdp-server-${TAG}-macos-universal.tar.gz"
+          shasum -a 256 build/macos-rdp-daemon | awk '{print $1}' > build/macos-rdp-daemon.sha256
+          ( cd build && shasum -a 256 macos-rdp-daemon "macos-rdp-server-${TAG}-macos-universal.tar.gz" > SHA256SUMS )
+          cat build/SHA256SUMS
 
       - name: Prepare release notes
         env:
@@ -185,4 +208,6 @@ jobs:
             --title "macos-rdp-server $TAG" \
             --notes-file /tmp/release-notes.md \
             build/macos-rdp-daemon \
+            build/macos-rdp-daemon.sha256 \
+            "build/macos-rdp-server-${TAG}-macos-universal.tar.gz" \
             build/SHA256SUMS

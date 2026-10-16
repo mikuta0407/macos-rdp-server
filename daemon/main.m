@@ -50,6 +50,7 @@ static void print_usage(const char *prog) {
         "Usage: %s [options]\n"
         "  --port <n>            TCP port to listen on (default: 3389)\n"
         "  --log-level <l>       error|info|verbose|debug (default: info)\n"
+        "  --version             print the version, then exit\n"
         "  --check-permissions   report Screen Recording + Accessibility state, then exit\n"
         "  --gesture-probe ...   post one trackpad gesture (or `listen`), then exit\n",
         prog);
@@ -78,6 +79,9 @@ int main(int argc, char *argv[]) {
                 return gs_probe_main(argc - i - 1, argv + i + 1);
             } else if (strcmp(argv[i], "--check-permissions") == 0) {
                 return check_permissions();
+            } else if (strcmp(argv[i], "--version") == 0) {
+                printf("macos-rdp-daemon %s (build %s)\n", MACOS_RDP_VERSION, MACOS_RDP_BUILD_VERSION);
+                return 0;
             } else if (strcmp(argv[i], "--help") == 0) {
                 print_usage(argv[0]); return 0;
             }
