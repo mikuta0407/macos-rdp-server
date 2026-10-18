@@ -167,7 +167,7 @@ Settings are environment variables passed to `macos-rdp-install-user` (see
 | `RDP_HIDPI` | auto | `auto`: HiDPI virtual display at a client scale ≥ 150 %; `0` never; `1` always |
 | `RDP_DISP` | on | `0` disables display control (the desktop keeps its connect-time size) |
 | `RDP_MACRDPX` | on | `0` disables the Mac-to-Mac extensions channel |
-| `RDP_CURSOR_SHAPES` | auto | `1` streams real cursor shapes to every client; `0` never. MACRDPX clients get them by default |
+| `RDP_CURSOR_SHAPES` | auto | `1` streams real cursor shapes to every client; `0` never. MACRDPX clients and phones/tablets (iOS, Android) get them by default |
 | `RDP_UPDATE_ENABLED` | `0` | `1` lets the daemon replace itself with the latest release. Leave it off with Homebrew |
 
 `RDP_ZENKAKU_TOGGLE`, `RDP_SWAP_CTRL_CMD`, `RDP_AUDIO_LOCAL`, `RDP_AUDIO_INPUT`,

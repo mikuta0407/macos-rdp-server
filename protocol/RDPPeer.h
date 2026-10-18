@@ -202,6 +202,10 @@ bool rdp_peer_send_h264_frame(freerdp_peer *peer,
  * caps exchange). Safe to call from any thread. */
 RDPGfxCodec rdp_peer_gfx_codec(freerdp_peer *peer);
 
+/* The client's OS as it reports it in the general capability set
+ * (OSMAJORTYPE_*), 0 when unknown. */
+uint32_t rdp_peer_client_os_major_type(freerdp_peer *peer);
+
 /*
  * Send one captured frame (32-bit BGRA/BGRX, top-down, `stride` bytes per row)
  * with the negotiated bitmap codec (Progressive or Planar). Only the 64x64

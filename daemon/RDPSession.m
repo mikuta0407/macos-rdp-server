@@ -721,9 +721,13 @@ static void rdp_on_keyframe_request(void *ud) {
     if (_cursor || !_peer) return;
     __weak typeof(self) weak = self;
     const char *curShapes = getenv("RDP_CURSOR_SHAPES");
-    /* A MACRDPX client draws alpha pointers properly, so it gets real shapes. */
+    /* A MACRDPX client draws alpha pointers properly, so it gets real shapes.
+     * So does a phone or tablet: it has no cursor of its own to draw for the
+     * system pointer, and Windows App on iOS shows none at all without one. */
+    uint32_t os = rdp_peer_client_os_major_type(_peer);
+    BOOL mobile = os == OSMAJORTYPE_IOS || os == OSMAJORTYPE_ANDROID;
     BOOL wantShapes = (curShapes && strcmp(curShapes, "1") == 0) ||
-                      (_mrxCaps & MRX_CAP_CURSOR_ALPHA);
+                      (_mrxCaps & MRX_CAP_CURSOR_ALPHA) || mobile;
     if (curShapes && strcmp(curShapes, "0") == 0) wantShapes = NO;
     if (wantShapes) {
         _cursor = [[CursorCapture alloc] init];
@@ -740,10 +744,13 @@ static void rdp_on_keyframe_request(void *ud) {
         };
         [_cursor start];
         rdp_info("cursor-shape streaming ON (%s)",
-                 (_mrxCaps & MRX_CAP_CURSOR_ALPHA) ? "MACRDPX client" : "RDP_CURSOR_SHAPES=1");
+                 (_mrxCaps & MRX_CAP_CURSOR_ALPHA) ? "MACRDPX client" :
+                 (curShapes && strcmp(curShapes, "1") == 0) ? "RDP_CURSOR_SHAPES=1" :
+                 "mobile client");
     } else if (!_mrxCaps) {
-        rdp_info("cursor-shape streaming OFF (default) — client draws the system "
-                 "arrow; set RDP_CURSOR_SHAPES=1 to stream real Mac cursor shapes");
+        rdp_info("cursor-shape streaming OFF (default; client OS type %u) — client "
+                 "draws the system arrow; set RDP_CURSOR_SHAPES=1 to stream real Mac "
+                 "cursor shapes", os);
     }
 }
 

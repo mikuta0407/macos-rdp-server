@@ -44,6 +44,7 @@ Test client: Windows `mstsc` → macOS Tahoe 26 arm64. Server build auto-updates
 |---|------|-------------|----------|--------|
 | 3.1 | Mouse move (1:1 position) | Move across whole screen | Tracks accurately | ✅ |
 | 3.2 | Cursor shapes (I-beam, resize, spinner) | Hover text / window edge | Shows correct cursor | ✅ (RDP_CURSOR_SHAPES=1, 24bpp) |
+| 3.2a | Cursor on Windows App for iPhone | Connect, switch to mouse-pointer mode | Cursor visible (shapes sent automatically to iOS/Android clients) | ✅ |
 | 3.3 | Left/right/middle click | Click around | Registers correctly | ✅ (left; double-click via click-state, VM test) |
 | 3.4 | Click-drag | Drag a window / select text | Works | ❓ |
 | 3.5 | Scroll wheel (vert/horiz) | Scroll a page | Scrolls correct direction | ❓ |

@@ -1299,6 +1299,11 @@ RDPGfxCodec rdp_peer_gfx_codec(freerdp_peer *peer) {
     return ((RDPPeerContext *)peer->context)->gfxCodec;
 }
 
+uint32_t rdp_peer_client_os_major_type(freerdp_peer *peer) {
+    if (!peer || !peer->context || !peer->context->settings) return 0;
+    return freerdp_settings_get_uint32(peer->context->settings, FreeRDP_OsMajorType);
+}
+
 bool rdp_peer_send_h264_frame(freerdp_peer *peer,
                                const uint8_t *data, size_t len,
                                uint32_t width, uint32_t height,

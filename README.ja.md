@@ -155,7 +155,7 @@ daemon は動いている間 Mac をスリープさせず、ディスプレイ�
 | `RDP_HIDPI` | auto | `auto`: クライアントのスケールが 150 % 以上なら HiDPI の仮想ディスプレイ。`0`: 使わない。`1`: 常に使う |
 | `RDP_DISP` | on | `0` でディスプレイ制御を無効化（デスクトップは接続時のサイズのまま） |
 | `RDP_MACRDPX` | on | `0` で Mac 同士の拡張チャネルを無効化 |
-| `RDP_CURSOR_SHAPES` | auto | `1` で実際のカーソル形状をすべてのクライアントに送る。`0` で送らない。MACRDPX クライアントには既定で送ります |
+| `RDP_CURSOR_SHAPES` | auto | `1` で実際のカーソル形状をすべてのクライアントに送る。`0` で送らない。MACRDPX クライアントと、iPhone・Android などのモバイルクライアントには既定で送ります |
 | `RDP_UPDATE_ENABLED` | `0` | `1` で daemon が自分を最新のリリースに置き換える。Homebrew で入れた場合は無効のままにしてください |
 
 `RDP_ZENKAKU_TOGGLE`、`RDP_SWAP_CTRL_CMD`、`RDP_AUDIO_LOCAL`、`RDP_AUDIO_INPUT`、`RDP_RDPDR_ENABLED`、
