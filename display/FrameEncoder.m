@@ -44,6 +44,7 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
     /* Guards _session: capture callbacks encode on their own queue while a
      * resize stops this encoder from the session queue. */
     pthread_mutex_t _sessionLock;
+    BOOL _stopped;   /* stop ran: a later (lazy) start is a no-op */
 }
 
 - (instancetype)initWithWidth:(uint32_t)width height:(uint32_t)height
@@ -73,29 +74,36 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
 }
 - (uint32_t)height { return _h; }
 
+- (BOOL)isStarted {
+    pthread_mutex_lock(&_sessionLock);
+    BOOL started = _session != NULL;
+    pthread_mutex_unlock(&_sessionLock);
+    return started;
+}
+
 - (BOOL)start {
     rdp_verbose("creating VT H.264 session %ux%u @ %u kbps", _w, _h, _bitrateKbps);
+    VTCompressionSessionRef session = NULL;
     OSStatus err = VTCompressionSessionCreate(kCFAllocatorDefault,
         (int32_t)_w, (int32_t)_h, kCMVideoCodecType_H264,
-        NULL, NULL, NULL, vt_callback, (__bridge void *)self, &_session);
+        NULL, NULL, NULL, vt_callback, (__bridge void *)self, &session);
     if (err != noErr) {
         rdp_error("VTCompressionSessionCreate failed: %d", (int)err);
         return NO;
     }
-
     int32_t bitrate = (int32_t)(_bitrateKbps * 1000);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_AverageBitRate,
+    VTSessionSetProperty(session, kVTCompressionPropertyKey_AverageBitRate,
                          (__bridge CFTypeRef)@(bitrate));
     /* NOTE: DataRateLimits was tried as a burst cap but (a) caused heavy pixelation
      * on connect by over-quantizing the keyframe and (b) did NOT fix the Reason 3334
      * desync — that still fired with tiny static-screen frames, so it is not a
      * bandwidth problem. Removed. */
 
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_RealTime,           kCFBooleanTrue);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_ProfileLevel,
+    VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime,           kCFBooleanTrue);
+    VTSessionSetProperty(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+    VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel,
                          kVTProfileLevel_H264_Baseline_AutoLevel);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_H264EntropyMode,
+    VTSessionSetProperty(session, kVTCompressionPropertyKey_H264EntropyMode,
                          kVTH264EntropyMode_CAVLC);
     /* Disable TIME-based periodic IDRs. VideoToolbox was emitting an IDR every 120
      * frames (~30s on a mostly-idle screen), and the Reason 3334 desync recurred at
@@ -103,10 +111,23 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
      * periodic IDR PDU as the trigger. We force keyframes explicitly (on GFX-ready
      * and on restore-from-minimize); scene-change IDRs still occur as needed. A huge
      * interval effectively suppresses the periodic ones. */
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameInterval,
                          (__bridge CFTypeRef)@(6000));
 
-    VTCompressionSessionPrepareToEncodeFrames(_session);
+    VTCompressionSessionPrepareToEncodeFrames(session);
+
+    /* Started lazily from the capture queue, so a stop (resize, teardown) may
+     * already have run on the session queue: then this session is not wanted. */
+    pthread_mutex_lock(&_sessionLock);
+    if (_stopped || _session) {
+        pthread_mutex_unlock(&_sessionLock);
+        VTCompressionSessionInvalidate(session);
+        CFRelease(session);
+        return NO;
+    }
+    _session = session;
+    pthread_mutex_unlock(&_sessionLock);
+
     rdp_info("H.264 encoder ready: %ux%u @ %u kbps", _w, _h, _bitrateKbps);
     return YES;
 }
@@ -155,6 +176,7 @@ static inline void unpack_rect(void *refcon, uint16_t *x, uint16_t *y,
     pthread_mutex_lock(&_sessionLock);
     VTCompressionSessionRef session = _session;
     _session = NULL;
+    _stopped = YES;
     pthread_mutex_unlock(&_sessionLock);
     if (!session) return;
     rdp_verbose("stopping encoder after %lld frames (%llu bytes encoded)",

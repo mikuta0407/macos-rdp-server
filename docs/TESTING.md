@@ -27,6 +27,7 @@ Test client: Windows `mstsc` → macOS Tahoe 26 arm64. Server build auto-updates
 | # | Item | How to test | Expected | Status |
 |---|------|-------------|----------|--------|
 | 2.1 | Desktop renders (AVC420/H.264) | Connect | Live desktop, correct content | ✅ |
+| 2.1a | Client without H.264 (AVC_DISABLED on every capset, e.g. Windows App on iPhone) | `sdl-freerdp /gfx:progressive:on,AVC420:off,AVC444:off`; `RDP_GFX_CODEC=planar` for Planar | Log `GFX codec: progressive (client disallows AVC ...)`, live desktop, no H.264 encoder; refresh on resize/restore | ✅ (VM, sdl-freerdp; iPhone not yet re-tested) |
 | 2.2 | Virtual display at client resolution | Connect at 3440×1440 | No pillarbox, native 1:1 | ✅ |
 | 2.2a | Main display (default) | Connect sdl-freerdp at 1280×1000 to a 4:3 Mac; then mRemote (iPhone sim) | Mac's own screen fitted with thin bars, clicks land where aimed; a resizing client gets the screen's own shape (2048×1536 Retina) | ✅ (VM, 2026-10-09) |
 | 2.3 | Correct colors | View photos / gradients | Accurate color | ❓ |
@@ -161,6 +162,7 @@ server's GUI session, then drive it with `rdp-keytest` (see the header of
 | `RDP_KEYBOARD_TYPE` | auto | Mac keyboard type for injected keys: `auto` (from the client's layout/type; if the client announces no layout, JIS is chosen on the first JIS-only key), `jis`, `ansi`, `iso`, or a number |
 | `RDP_ZENKAKU_TOGGLE` | 1 | JIS clients: Hankaku/Zenkaku switches Kana ⇄ Eisu (0 = send it as the ` key) |
 | `RDP_SWAP_CTRL_CMD` | 0 | Swap Ctrl and Cmd (Windows-style ⌃C/⌃V) |
+| `RDP_GFX_CODEC` | auto | GFX codec: `auto` (H.264/AVC420 when the client's caps allow it, else RemoteFX Progressive), `avc` (force H.264, even to a client that disallows it), `progressive`, `planar`. The choice is logged at info: `GFX codec: ...` |
 | `RDP_ALLOW_IDLE_SLEEP` | 0 | Allow Mac to idle-sleep (breaks remote access) |
 | `RDP_UPDATE_ENABLED` | 1 | Enable auto-update (`install-user.sh` writes 0 unless set: the updater would replace a source build with the upstream release) |
 | `RDP_UPDATE_INTERVAL_MIN` | 5 | Auto-update check interval in minutes |

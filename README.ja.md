@@ -149,6 +149,7 @@ daemon は動いている間 Mac をスリープさせず、ディスプレイ�
 | `RDP_KEYBOARD_TYPE` | auto | `jis`、`ansi`、`iso`、`auto`。[docs/JAPANESE-SETUP.md](docs/JAPANESE-SETUP.md) を参照 |
 | `RDP_MAX_FPS` | `30` | フレームレートの上限（1〜120）。MACRDPX クライアントはセッションごとに変えられます |
 | `RDP_BITRATE_KBPS` | `8000` | H.264 の目標ビットレート。同じく MACRDPX クライアントはセッションごとに変えられます |
+| `RDP_GFX_CODEC` | `auto` | 画面のコーデック。`auto`: クライアントが受け付ければ H.264 (AVC420)、受け付けなければ RemoteFX Progressive（iPhone の Windows App など）。`avc`、`progressive`、`planar` で固定（テスト用） |
 | `RDP_DISPLAY_MODE` | `main` | `main` は Mac のメインディスプレイを表示。`virtual` はセッションごとにクライアントに合わせたサイズの専用ディスプレイを用意 |
 | `RDP_MATCH_RESOLUTION` | `1` | メインディスプレイの場合。`1`: Mac の解像度をクライアントにいちばん近い表示モードに切り替える。`0`: 変えない |
 | `RDP_HIDPI` | auto | `auto`: クライアントのスケールが 150 % 以上なら HiDPI の仮想ディスプレイ。`0`: 使わない。`1`: 常に使う |

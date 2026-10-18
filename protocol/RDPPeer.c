@@ -18,9 +18,11 @@
 #include <freerdp/crypto/privatekey.h>
 #include <winpr/ssl.h>
 #include <winpr/synch.h>
+#include <winpr/sysinfo.h>
 #include <winpr/wtsapi.h>
 #include <winpr/stream.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <pthread.h>
 
@@ -231,6 +233,8 @@ static void context_free(freerdp_peer *peer, rdpContext *ctx) {
         c->disp = NULL;
     }
     if (c->gfx)    { rdpgfx_server_context_free(c->gfx);    c->gfx    = NULL; }
+    rdp_gfx_bitmap_encoder_free(c->bitmapEncoder);
+    c->bitmapEncoder = NULL;
     if (c->cliprdr){ cliprdr_server_context_free(c->cliprdr);c->cliprdr= NULL; }
     if (c->rdpsnd) { rdpsnd_server_context_free(c->rdpsnd);  c->rdpsnd = NULL; }
     /* Audio input (MS-RDPEAI) — close and release the ObjC object. */
@@ -288,6 +292,56 @@ static BOOL peer_mouse_ex(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
 
 /* ── GFX caps negotiation ──────────────────────────────────────────────── */
 
+/* Whether a capset lets the server send AVC420. v8.0 has no AVC; v8.1 has it
+ * only with AVC420_ENABLED; v10+ have it unless AVC_DISABLED is set. Windows
+ * App on iPhone sets AVC_DISABLED on every set (and no AVC420_ENABLED on v8.1)
+ * and drops the connection (0x200d, protocol error) on the first AVC frame. */
+static bool gfx_capset_allows_avc(const RDPGFX_CAPSET *cs) {
+    if (cs->version < RDPGFX_CAPVERSION_81) return false;
+    /* v10.1 carries no flags (16 reserved bytes), so it cannot say "no AVC":
+     * FreeRDP advertises it with flags 0 even with H.264 off. It is never the
+     * set to trust for AVC. (FreeRDP's server also writes its confirm 12 bytes
+     * short, which its client reports as a malformed PDU.) */
+    if (cs->version == RDPGFX_CAPVERSION_101) return false;
+    if (cs->version == RDPGFX_CAPVERSION_81)
+        return (cs->flags & RDPGFX_CAPS_FLAG_AVC420_ENABLED) != 0;
+    return (cs->flags & RDPGFX_CAPS_FLAG_AVC_DISABLED) == 0;
+}
+
+static const char *gfx_codec_name(RDPGfxCodec c) {
+    switch (c) {
+    case RDP_GFX_CODEC_AVC420:      return "AVC420";
+    case RDP_GFX_CODEC_PROGRESSIVE: return "progressive";
+    case RDP_GFX_CODEC_PLANAR:      return "planar";
+    default:                        return "none";
+    }
+}
+
+/* RDP_GFX_CODEC: auto (default) | avc | progressive | planar. "auto" sends
+ * AVC420 when the client allows it, and RemoteFX Progressive when it does not.
+ * The others force a codec, for testing; a forced "avc" is sent even to a
+ * client that disallows it. */
+static RDPGfxCodec gfx_codec_from_env(void) {
+    const char *v = getenv("RDP_GFX_CODEC");
+    if (!v || !*v || strcasecmp(v, "auto") == 0) return RDP_GFX_CODEC_NONE;
+    if (strcasecmp(v, "avc") == 0 || strcasecmp(v, "avc420") == 0 ||
+        strcasecmp(v, "h264") == 0)
+        return RDP_GFX_CODEC_AVC420;
+    if (strcasecmp(v, "progressive") == 0) return RDP_GFX_CODEC_PROGRESSIVE;
+    if (strcasecmp(v, "planar") == 0) return RDP_GFX_CODEC_PLANAR;
+    rdp_error("RDP_GFX_CODEC=%s is not auto|avc|progressive|planar; using auto", v);
+    return RDP_GFX_CODEC_NONE;
+}
+
+static UINT gfx_frame_acknowledge(RdpgfxServerContext *gfx,
+                                  const RDPGFX_FRAME_ACKNOWLEDGE_PDU *ack) {
+    RDPPeerContext *ctx = (RDPPeerContext *)gfx->custom;
+    ctx->gfxAcksSuspended  = ack->queueDepth == SUSPEND_FRAME_ACKNOWLEDGEMENT;
+    ctx->gfxLastAckedFrame = ack->frameId;
+    ctx->gfxLastAckMs      = GetTickCount64();
+    return CHANNEL_RC_OK;
+}
+
 static UINT gfx_caps_advertise(RdpgfxServerContext *gfx,
                                 const RDPGFX_CAPS_ADVERTISE_PDU *pdu) {
     RDPPeerContext *ctx = (RDPPeerContext *)gfx->custom;
@@ -298,34 +352,63 @@ static UINT gfx_caps_advertise(RdpgfxServerContext *gfx,
     RDPGFX_CAPS_CONFIRM_PDU confirm = {0};
     confirm.capsSet = &capset;
 
-    /* Walk advertised caps: prefer 8.x (has AVC420), skip anything lower. */
+    /* Pick the HIGHEST advertised version >= v8 and echo it back VERBATIM
+     * (version, length AND flags). Two mstsc requirements learned the hard way
+     * from its client event log:
+     *   1. The confirmed capset must EXACTLY match one advertised — leaving
+     *      length=0 got CapsConfirm rejected (GfxEventConfirmCapsFailed /
+     *      0x8007000D), so we copy the whole struct verbatim.
+     *   2. Confirming the LOWEST version (v8, flags=0) leaves "AVC available: 0"
+     *      and mstsc cannot decode our AVC420 frames (GfxEventDecodingW2S1PduFailed
+     *      / 0x8000FFFF). v8.1 / v10.x enable AVC420 by default, so pick the
+     *      highest version the client offered.
+     * A set the client marked as not taking AVC (AVC_DISABLED, or v8.1 without
+     * AVC420_ENABLED) is only picked when none allows AVC; the surface is then
+     * fed with RemoteFX Progressive (or Planar) instead of H.264. */
+    RDPGFX_CAPSET best = {0}, bestAvc = {0}, v101 = {0};
     for (UINT16 i = 0; i < pdu->capsSetCount; i++) {
-        rdp_debug("  caps[%u] version=0x%08x flags=0x%08x",
-                  i, pdu->capsSets[i].version, pdu->capsSets[i].flags);
-        /* Pick the HIGHEST advertised version >= v8 and echo it back VERBATIM
-         * (version, length AND flags). Two mstsc requirements learned the hard way
-         * from its client event log:
-         *   1. The confirmed capset must EXACTLY match one advertised — leaving
-         *      length=0 got CapsConfirm rejected (GfxEventConfirmCapsFailed /
-         *      0x8007000D), so we copy the whole struct verbatim.
-         *   2. Confirming the LOWEST version (v8, flags=0) leaves "AVC available: 0"
-         *      and mstsc cannot decode our AVC420 frames (GfxEventDecodingW2S1PduFailed
-         *      / 0x8000FFFF). v8.1 / v10.x enable AVC420 by default, so pick the
-         *      highest version the client offered. */
-        if (pdu->capsSets[i].version >= RDPGFX_CAPVERSION_8 &&
-            pdu->capsSets[i].version >= capset.version) {
-            capset = pdu->capsSets[i];
-        }
+        const RDPGFX_CAPSET *cs = &pdu->capsSets[i];
+        rdp_debug("  caps[%u] version=0x%08x flags=0x%08x", i, cs->version, cs->flags);
+        if (cs->version < RDPGFX_CAPVERSION_8) continue;
+        if (cs->version == RDPGFX_CAPVERSION_101) { v101 = *cs; continue; }
+        if (cs->version >= best.version) best = *cs;
+        if (gfx_capset_allows_avc(cs) && cs->version >= bestAvc.version) bestAvc = *cs;
     }
-    if (!capset.version) {
+    if (!best.version) best = v101;   /* v10.1 only as a last resort (see above) */
+    if (!best.version) {
         rdp_error("client advertised no usable GFX caps version");
         return ERROR_INTERNAL_ERROR;
+    }
+
+    RDPGfxCodec forced = gfx_codec_from_env();
+    RDPGfxCodec codec;
+    const char *why;
+    if (forced == RDP_GFX_CODEC_AVC420) {
+        capset = bestAvc.version ? bestAvc : best;
+        codec = RDP_GFX_CODEC_AVC420;
+        why = bestAvc.version ? "forced by RDP_GFX_CODEC" :
+              "forced by RDP_GFX_CODEC although the client disallows AVC";
+    } else if (forced != RDP_GFX_CODEC_NONE) {
+        capset = best;
+        codec = forced;
+        why = "forced by RDP_GFX_CODEC";
+    } else if (bestAvc.version) {
+        capset = bestAvc;
+        codec = RDP_GFX_CODEC_AVC420;
+        why = "client allows AVC";
+    } else {
+        capset = best;
+        codec = RDP_GFX_CODEC_PROGRESSIVE;
+        why = "client disallows AVC";
     }
     rdp_verbose("GFX confirming version=0x%08x flags=0x%08x",
                 capset.version, capset.flags);
 
     UINT rc = gfx->CapsConfirm(gfx, &confirm);
     if (rc != CHANNEL_RC_OK) { rdp_error("CapsConfirm failed: %u", rc); return rc; }
+    ctx->gfxCodec = codec;
+    rdp_info("GFX codec: %s (%s; caps version=0x%08x flags=0x%08x)",
+             gfx_codec_name(codec), why, capset.version, capset.flags);
 
     rdpSettings *s = ctx->base.peer->context->settings;
     UINT32 w = freerdp_settings_get_uint32(s, FreeRDP_DesktopWidth);
@@ -361,7 +444,7 @@ static UINT gfx_caps_advertise(RdpgfxServerContext *gfx,
         ctx->keyframeRequested = true;
         ctx->callbacks.onKeyframeRequest(ctx->callbacks.userdata);
     }
-    rdp_info("GFX pipeline ready (%ux%u AVC420)", w, h);
+    rdp_info("GFX pipeline ready (%ux%u %s)", w, h, gfx_codec_name(ctx->gfxCodec));
     return CHANNEL_RC_OK;
 }
 
@@ -778,6 +861,7 @@ static BOOL peer_post_connect(freerdp_peer *peer) {
     if (!ctx->gfx) { rdp_error("rdpgfx_server_context_new failed"); return FALSE; }
     ctx->gfx->custom        = ctx;
     ctx->gfx->CapsAdvertise = gfx_caps_advertise;
+    ctx->gfx->FrameAcknowledge = gfx_frame_acknowledge;
     ctx->surfaceId          = 1;
     /* External-thread mode: do NOT let GFX spawn its own thread. The default
      * (ownThread=TRUE) runs an internal loop calling rdpgfx_server_handle_messages
@@ -1209,6 +1293,10 @@ bool rdp_peer_run_once(freerdp_peer *peer) {
 
     pthread_mutex_unlock(&ctx->xportLock);
     return ok;
+}
+
+RDPGfxCodec rdp_peer_gfx_codec(freerdp_peer *peer) {
+    return ((RDPPeerContext *)peer->context)->gfxCodec;
 }
 
 bool rdp_peer_send_h264_frame(freerdp_peer *peer,

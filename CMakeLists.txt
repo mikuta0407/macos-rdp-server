@@ -103,6 +103,7 @@ add_executable(macos-rdp-daemon
     daemon/AutoUpdate.m
     daemon/FileProvider/RDPFileProvider.m
     protocol/RDPPeer.c
+    protocol/RDPGfxBitmap.c
     protocol/RDPMacrdpx.c
     protocol/RDPWebDAV.c
     protocol/RDPDriveMount.m

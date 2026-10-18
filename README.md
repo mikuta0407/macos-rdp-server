@@ -161,6 +161,7 @@ Settings are environment variables passed to `macos-rdp-install-user` (see
 | `RDP_KEYBOARD_TYPE` | auto | `jis`, `ansi`, `iso` or `auto`; see [docs/JAPANESE-SETUP.md](docs/JAPANESE-SETUP.md) |
 | `RDP_MAX_FPS` | `30` | Frame-rate cap (1–120); a MACRDPX client may change it per session |
 | `RDP_BITRATE_KBPS` | `8000` | H.264 target bit rate; likewise per session for MACRDPX clients |
+| `RDP_GFX_CODEC` | `auto` | Graphics codec. `auto`: H.264 (AVC420) when the client accepts it, RemoteFX Progressive when it does not (Windows App on iPhone); `avc`, `progressive` or `planar` force one, for testing |
 | `RDP_DISPLAY_MODE` | `main` | `main` shows the Mac's main display; `virtual` gives each session a display of its own, sized to the client |
 | `RDP_MATCH_RESOLUTION` | `1` | On the main display: `1` switches the Mac's resolution to the mode closest to the client's; `0` leaves it as it is |
 | `RDP_HIDPI` | auto | `auto`: HiDPI virtual display at a client scale ≥ 150 %; `0` never; `1` always |

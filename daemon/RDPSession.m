@@ -447,8 +447,9 @@ static void rdp_on_keyframe_request(void *ud) {
         rdp_peer_send_h264_frame(strong.peer, data, len, width, height,
                                  keyFrame ? true : false, dx, dy, dw, dh);
     };
-    [_encoder start];
-    rdp_verbose("H.264 encoder started at %u kbps", _bitrateKbps);
+    /* The encoder starts on the first frame for a client that takes H.264; a
+     * client that does not (RDPGFX AVC_DISABLED) gets the captured pixels in
+     * RemoteFX Progressive or Planar instead, and no H.264 session runs. */
 
     _capture = [[ScreenCapture alloc] initWithDisplayID:displayID];
     _capture.maxFps = _maxFps;
@@ -463,13 +464,41 @@ static void rdp_on_keyframe_request(void *ud) {
         uint16_t dw = (uint16_t)MIN((double)width,  dirty.size.width);
         uint16_t dh = (uint16_t)MIN((double)height, dirty.size.height);
         rdp_debug("captured frame: dirty=(%u,%u,%ux%u)", dx, dy, dw, dh);
-        [strong.encoder encodeFrame:surface dirtyX:dx dirtyY:dy dirtyW:dw dirtyH:dh];
+        switch (rdp_peer_gfx_codec(strong.peer)) {
+        case RDP_GFX_CODEC_AVC420: {
+            FrameEncoder *encoder = strong.encoder;
+            if (!encoder.started && [encoder start])
+                rdp_verbose("H.264 encoder started at %u kbps", encoder.targetBitrateKbps);
+            [encoder encodeFrame:surface dirtyX:dx dirtyY:dy dirtyW:dw dirtyH:dh];
+            break;
+        }
+        case RDP_GFX_CODEC_PROGRESSIVE:
+        case RDP_GFX_CODEC_PLANAR:
+            [strong sendBitmapFrame:surface width:width height:height];
+            break;
+        default:
+            break;   /* GFX caps not exchanged yet: nothing to send with */
+        }
     };
     if ([_capture startWithWidth:width height:height])
         rdp_verbose("screen capture started on displayID=%u", displayID);
     else
         rdp_error("screen capture FAILED on displayID=%u — desktop will be black "
                   "until Screen Recording is granted", displayID);
+}
+
+/* Hands a captured frame's pixels to the bitmap codec (Progressive/Planar). */
+- (void)sendBitmapFrame:(IOSurfaceRef)surface width:(uint32_t)width height:(uint32_t)height {
+    if (IOSurfaceGetWidth(surface) != width || IOSurfaceGetHeight(surface) != height ||
+        IOSurfaceGetPixelFormat(surface) != kCVPixelFormatType_32BGRA) {
+        rdp_debug("captured surface %zux%zu does not match the stream %ux%u; dropped",
+                  IOSurfaceGetWidth(surface), IOSurfaceGetHeight(surface), width, height);
+        return;
+    }
+    if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) return;
+    rdp_peer_send_bgra_frame(_peer, IOSurfaceGetBaseAddress(surface),
+                             (uint32_t)IOSurfaceGetBytesPerRow(surface), width, height);
+    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
 }
 
 - (void)stopMedia {

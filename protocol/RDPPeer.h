@@ -16,6 +16,16 @@
 
 typedef struct rdp_peer_context RDPPeerContext;
 typedef struct RDPWebDAVServer  RDPWebDAVServer;
+typedef struct RDPGfxBitmapEncoder RDPGfxBitmapEncoder;
+
+/* The codec the GFX surface is fed with, chosen from the client's caps in
+ * CapsAdvertise (and RDP_GFX_CODEC). NONE until the client advertised. */
+typedef enum {
+    RDP_GFX_CODEC_NONE = 0,
+    RDP_GFX_CODEC_AVC420,      /* H.264 from VideoToolbox */
+    RDP_GFX_CODEC_PROGRESSIVE, /* RemoteFX Progressive, from captured BGRA */
+    RDP_GFX_CODEC_PLANAR,      /* Planar, from captured BGRA */
+} RDPGfxCodec;
 
 typedef void (*RDPPeerInputCallback)(void *userdata, uint16_t flags, uint16_t code);
 typedef void (*RDPPeerSyncCallback)(void *userdata, uint32_t toggleFlags);
@@ -77,6 +87,15 @@ struct rdp_peer_context {
     pthread_mutex_t      xportLock;
     bool                 gfxOpened;  /* GFX DVC Open() succeeded (drdynvc ready) */
     bool                 gfxReady;   /* client sent GFX caps; surface mapped */
+    /* Chosen in CapsAdvertise. AVC420 feeds the H.264 encoder; the bitmap
+     * codecs encode the captured BGRA frames (protocol/RDPGfxBitmap.c). */
+    volatile RDPGfxCodec gfxCodec;
+    RDPGfxBitmapEncoder *bitmapEncoder;   /* capture queue only; freed with the context */
+    /* GFX frame acknowledgement, which paces the bitmap codecs: their frames
+     * are large, and without a limit they queue up on a slow link. */
+    volatile uint32_t    gfxLastAckedFrame;
+    volatile uint64_t    gfxLastAckMs;
+    volatile bool        gfxAcksSuspended; /* client asked not to be acked against */
     bool                 sentKeyframe;     /* a keyframe has been sent this session */
     bool                 keyframeRequested;/* debounce: requested an IDR, awaiting it */
     bool                 outputSuppressed; /* client minimized: Suppress Output PDU -> pause sends */
@@ -178,6 +197,21 @@ bool rdp_peer_send_h264_frame(freerdp_peer *peer,
                                bool isKeyFrame,
                                uint16_t dirtyX, uint16_t dirtyY,
                                uint16_t dirtyW, uint16_t dirtyH);
+
+/* The GFX codec negotiated with the client (RDP_GFX_CODEC_NONE until the GFX
+ * caps exchange). Safe to call from any thread. */
+RDPGfxCodec rdp_peer_gfx_codec(freerdp_peer *peer);
+
+/*
+ * Send one captured frame (32-bit BGRA/BGRX, top-down, `stride` bytes per row)
+ * with the negotiated bitmap codec (Progressive or Planar). Only the 64x64
+ * tiles that changed since the last frame sent go out; a refresh (GFX ready,
+ * resize, restore from minimize) sends the whole surface. Call it from one
+ * thread only (the capture queue). Implemented in protocol/RDPGfxBitmap.c.
+ */
+bool rdp_peer_send_bgra_frame(freerdp_peer *peer, const uint8_t *bgra,
+                              uint32_t stride, uint32_t width, uint32_t height);
+void rdp_gfx_bitmap_encoder_free(RDPGfxBitmapEncoder *encoder);
 
 bool rdp_peer_send_bitmap(freerdp_peer *peer,
                            const uint8_t *bgra, uint32_t x, uint32_t y,
