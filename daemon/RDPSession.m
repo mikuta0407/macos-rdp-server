@@ -70,6 +70,15 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
 @property (nonatomic, strong) VirtualDisplay  *display;
 /* The main display's resolution, while it follows the client's. */
 @property (nonatomic, strong) MainDisplayMode *mainMode;
+/* The size the client asked for at connect, before the desktop grew to hold
+ * the main display (0 while not known). */
+@property (nonatomic, assign) uint32_t clientWidth;
+@property (nonatomic, assign) uint32_t clientHeight;
+/* Decided once, before the capabilities go out: 1 virtual, 2 main, 0 not yet. */
+@property (nonatomic, assign) int displayChoice;
+/* The main display has no mode of the client's shape: the session gets a
+ * display of the client's size, and the main display mirrors it. */
+@property (nonatomic, assign) BOOL mirrorMain;
 /* The display the session captures and puts input on. */
 @property (nonatomic, assign) CGDirectDisplayID displayID;
 @property (nonatomic, strong) DisplayControl  *displayControl;
@@ -143,6 +152,7 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
         .onMouseEx   = rdp_on_mouse_ex,
         .onClipboard = rdp_on_clipboard,
         .onReady     = rdp_on_ready,
+        .onDesktopSize = rdp_on_desktop_size,
         .onKeyframeRequest = rdp_on_keyframe_request,
         .onMacrdpx   = rdp_on_macrdpx,
         .userdata    = (__bridge void *)self,
@@ -219,6 +229,11 @@ static void rdp_on_ready(void *ud, uint32_t w, uint32_t h, uint32_t depth) {
      * teardown has freed _peer (use-after-free crash), and media would never be
      * set up during a live session. Run it inline: the peer is alive here. */
     [self setupDisplayAndMediaForWidth:w height:h];
+}
+
+static void rdp_on_desktop_size(void *ud, uint32_t *w, uint32_t *h, uint32_t scale) {
+    RDPSession *self = (__bridge RDPSession *)ud;
+    [self chooseDesktopWidth:w height:h scale:scale];
 }
 
 static void rdp_on_keyboard(void *ud, uint16_t flags, uint16_t code) {
@@ -391,6 +406,12 @@ static void rdp_on_keyframe_request(void *ud) {
  * own, sized to the client. A Mac with no display lit (a closed lid, a mini
  * without a monitor) gets a virtual one either way. */
 - (BOOL)wantsVirtualDisplay {
+    if (_displayChoice) return _displayChoice == 1;
+    _displayChoice = [self decideVirtualDisplay] ? 1 : 2;
+    return _displayChoice == 1;
+}
+
+- (BOOL)decideVirtualDisplay {
     const char *mode = getenv("RDP_DISPLAY_MODE");
     if (mode && strcmp(mode, "virtual") == 0) return YES;
     CGDirectDisplayID active[16];
@@ -403,23 +424,40 @@ static void rdp_on_keyframe_request(void *ud) {
     return YES;
 }
 
-/* The size to stream the main display at: its own shape, in points, or in
- * pixels for a client drawing at Retina density, kept within what H.264
- * decoders take (4096x2304). */
+/* The size to stream the main display at, given the client's size in *w x *h:
+ * the client's own shape, just big enough to hold the display at its size in
+ * points (in pixels for a client drawing at Retina density), centred with bars
+ * around it, kept within what H.264 decoders take (4096x2304). A client may
+ * stretch a desktop of another shape than its own to fill its window (Windows
+ * App on iOS does), so the shape stays the client's, and the display keeps
+ * its full resolution for the client to zoom into. */
 - (void)mainDisplayStreamSizeHiDPI:(BOOL)hidpi width:(uint32_t *)w height:(uint32_t *)h {
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(_displayID);
+    [self streamSizeForMode:mode hiDPI:hidpi width:w height:h];
+    if (mode) CGDisplayModeRelease(mode);
+}
+
+/* The same, for the main display in the given mode. */
+- (void)streamSizeForMode:(nullable CGDisplayModeRef)mode hiDPI:(BOOL)hidpi
+                    width:(uint32_t *)w height:(uint32_t *)h {
+    /* *w x *h is the client's size coming in, the stream's going out. */
     CGRect bounds = CGDisplayBounds(_displayID);
     double dw = bounds.size.width, dh = bounds.size.height;
-    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(_displayID);
     if (mode) {
-        if (hidpi) {
-            dw = (double)CGDisplayModeGetPixelWidth(mode);
-            dh = (double)CGDisplayModeGetPixelHeight(mode);
-        }
-        CGDisplayModeRelease(mode);
+        BOOL turned = (dw >= dh) != (CGDisplayModeGetWidth(mode) >= CGDisplayModeGetHeight(mode));
+        dw = (double)(hidpi ? CGDisplayModeGetPixelWidth(mode) : CGDisplayModeGetWidth(mode));
+        dh = (double)(hidpi ? CGDisplayModeGetPixelHeight(mode) : CGDisplayModeGetHeight(mode));
+        if (turned) { double t = dw; dw = dh; dh = t; }   /* a display rotated in Settings */
     }
-    double fit = MIN(1.0, MIN(4096.0 / MAX(dw, dh), 2304.0 / MIN(dw, dh)));
-    *w = MAX((uint32_t)(dw * fit), 200u) & ~1u;
-    *h = MAX((uint32_t)(dh * fit), 200u) & ~1u;
+    double sw = dw, sh = dh;
+    if (*w && *h) {
+        double cover = MAX(dw / *w, dh / *h);
+        sw = MAX(*w * cover, dw);
+        sh = MAX(*h * cover, dh);
+    }
+    double fit = MIN(1.0, MIN(4096.0 / MAX(sw, sh), 2304.0 / MIN(sw, sh)));
+    *w = MAX((uint32_t)lround(sw * fit), 200u) & ~1u;
+    *h = MAX((uint32_t)lround(sh * fit), 200u) & ~1u;
 }
 
 /* Stream pixels per point of the captured display. The picture keeps its
@@ -513,18 +551,75 @@ static void rdp_on_keyframe_request(void *ud) {
  * and HiDPI for a Retina client. */
 - (BOOL)matchMainDisplayWidth:(uint32_t)w height:(uint32_t)h scale:(uint32_t)scale {
     if (!_mainMode) return NO;
-    BOOL hidpi = [self wantsHiDPIForScale:scale];
+    double pw, ph;
+    BOOL hidpi = [self mainDisplayPointWidth:&pw height:&ph forWidth:w height:h scale:scale];
+    return [_mainMode matchPointWidth:pw height:ph hiDPI:hidpi];
+}
+
+/* The client's size in points of the main display, and whether to draw it at
+ * Retina density. A display with no HiDPI mode (most external monitors macOS
+ * does not scale) is matched by the client's pixels instead, so a phone gets
+ * a desktop as sharp as its screen, not one a third of it. */
+- (BOOL)mainDisplayPointWidth:(double *)pw height:(double *)ph
+                     forWidth:(uint32_t)w height:(uint32_t)h scale:(uint32_t)scale {
+    BOOL hidpi = [self wantsHiDPIForScale:scale] && _mainMode.offersHiDPI;
     double perPoint = hidpi && scale ? scale / 100.0 : 1.0;
-    return [_mainMode matchPointWidth:w / perPoint height:h / perPoint hiDPI:hidpi];
+    *pw = w / perPoint;
+    *ph = h / perPoint;
+    return hidpi;
+}
+
+/* Before the capabilities go out: on the main display the desktop is made big
+ * enough to hold the mode the display will take at full resolution, in the
+ * client's shape, so the display is not squeezed into the client's size (a
+ * phone shows it whole and pinches in). */
+- (void)chooseDesktopWidth:(uint32_t *)w height:(uint32_t *)h scale:(uint32_t)scale {
+    if (_clientWidth) {          /* a reactivation: the desktop keeps its size */
+        *w = _streamWidth ?: *w;
+        *h = _streamHeight ?: *h;
+        return;
+    }
+    _clientWidth = *w;
+    _clientHeight = *h;
+    if ([self wantsVirtualDisplay]) return;
+    _displayID = CGMainDisplayID();
+    _mainMode = [[MainDisplayMode alloc] initWithDisplayID:_displayID];
+    double pw, ph;
+    BOOL hidpi = [self mainDisplayPointWidth:&pw height:&ph forWidth:*w height:*h scale:scale];
+    CGDisplayModeRef mode = [_mainMode copyModeForPointWidth:pw height:ph hiDPI:hidpi];
+    /* No mode of the client's shape (a phone upright, a monitor with one mode):
+     * as a Windows host makes its desktop the client's size, the session gets
+     * a display of exactly the client's size, and the main display mirrors it,
+     * so the Mac stays one desktop. The client's size goes out unchanged. */
+    /* Without a mode (a display being set up again, as when the last session's
+     * mirror has just ended) the display's bounds give its shape. */
+    CGRect bounds = CGDisplayBounds(_displayID);
+    double mw = mode ? (double)CGDisplayModeGetWidth(mode) : bounds.size.width;
+    double mh = mode ? (double)CGDisplayModeGetHeight(mode) : bounds.size.height;
+    if (MainDisplayMode.isEnabled && mw > 0 && mh > 0 && *w && *h &&
+        fabs(log((mw / mh) / ((double)*w / *h))) > 0.05) {
+        if (mode) CGDisplayModeRelease(mode);
+        _mirrorMain = YES;
+        *w = MIN(MAX(*w, 200u), 7680u) & ~1u;
+        *h = MIN(MAX(*h, 200u), 4320u) & ~1u;
+        rdp_info("client asks for %ux%u @%u%%; no mode of that shape, so the main display "
+                 "will mirror a %ux%u display", _clientWidth, _clientHeight, scale, *w, *h);
+        return;
+    }
+    [self streamSizeForMode:mode hiDPI:hidpi width:w height:h];
+    if (mode) CGDisplayModeRelease(mode);
+    rdp_info("client asks for %ux%u @%u%%; the desktop is %ux%u%s, to hold the main display",
+             _clientWidth, _clientHeight, scale, *w, *h, hidpi ? " HiDPI" : "");
 }
 
 /* A display-control request from the client (window resized, scale changed):
  * the virtual display, the stream and the GFX surface all follow it. The main
- * display changes to the mode closest to it, and the stream takes the main
- * display's shape, at the density the client asked for. */
+ * display changes to the mode closest to it, and the stream, in the client's
+ * shape, grows to hold it at the density the client asked for. */
 - (void)applyLayoutWidth:(uint32_t)w height:(uint32_t)h scale:(uint32_t)scale {
     BOOL hidpi = [self wantsHiDPIForScale:scale];
     BOOL modeChanged = NO;
+    if (!_display) hidpi = hidpi && _mainMode.offersHiDPI;
     if (_display) {
         w = MIN(MAX(w, 200u), 7680u) & ~1u;
         h = MIN(MAX(h, 200u), 4320u) & ~1u;
@@ -577,6 +672,14 @@ static void rdp_on_keyframe_request(void *ud) {
     }
     rdp_info("authentication OK for %s (user='%s')",
              _address.UTF8String, user.length ? user.UTF8String : "(none)");
+    {
+        /* The domain is the Mac's own name, as a Windows host gives its own. */
+        char host[256] = "";
+        gethostname(host, sizeof(host));
+        char *dot = strchr(host, '.');
+        if (dot) *dot = '\0';
+        rdp_peer_send_logon_info(_peer, user.length ? user.UTF8String : "", host);
+    }
 
     /* ── Become the single active session (takeover) ──────────────────────────
      * Ask the server to make us active. It signals any currently-active session
@@ -611,18 +714,30 @@ static void rdp_on_keyframe_request(void *ud) {
         } else {
             rdp_verbose("VirtualDisplay created: displayID=%u", _display.displayID);
         }
+    } else if (_mirrorMain) {
+        CGDirectDisplayID main = CGMainDisplayID();
+        _display = [[VirtualDisplay alloc] initWithWidth:width height:height
+                                                   hiDPI:[self wantsHiDPIForScale:scale]];
+        if (![_display create] || ![_display mirrorOnto:main]) {
+            rdp_error("the main display could not mirror a display of the client's size; "
+                      "showing it fitted into the client's");
+            [_display destroy];
+            _display = nil;
+        }
     }
-    /* On the main display the client's size stays as it is: the picture is fitted
-     * into it, as mstsc drops a session whose graphics are reset before the first
-     * frame. A client that resizes gets the main display's shape then. */
+    /* On the main display the desktop already has the shape of the mode chosen
+     * for the client (-chooseDesktopWidth:...), so taking that mode leaves the
+     * stream's size as it is: mstsc drops a session whose graphics are reset
+     * before the first frame. Should the mode not take, the picture is fitted
+     * into the stream. */
     CGDirectDisplayID displayID = _display ? _display.displayID : CGMainDisplayID();
     _displayID = displayID;
     if (!_display) {
         rdp_info("showing the main display %u", displayID);
-        if (MainDisplayMode.isEnabled) {
-            _mainMode = [[MainDisplayMode alloc] initWithDisplayID:displayID];
-            [self matchMainDisplayWidth:width height:height scale:scale];
-        }
+        if (!_mainMode) _mainMode = [[MainDisplayMode alloc] initWithDisplayID:displayID];
+        if (MainDisplayMode.isEnabled)
+            [self matchMainDisplayWidth:_clientWidth ?: width height:_clientHeight ?: height
+                                  scale:scale];
     }
 
     /* Wake the Mac + keep it awake for the whole session (replaces caffeinate),

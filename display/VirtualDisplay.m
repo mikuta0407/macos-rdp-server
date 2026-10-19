@@ -10,6 +10,8 @@
 @property (nonatomic, assign) uint32_t h;
 @property (nonatomic, assign) BOOL created;
 @property (nonatomic, assign) BOOL hidpi;
+/* The real display mirroring this one, or kCGNullDirectDisplay. */
+@property (nonatomic, assign) CGDirectDisplayID mirror;
 
 #if MACOS_RDP_VIRTUAL_DISPLAY
 /* Opaque pointers so the compiler doesn't need CGVirtualDisplay headers here.
@@ -65,6 +67,15 @@
 
 - (void)destroy {
     if (!_created) return;
+    if (_mirror) {
+        CGDisplayConfigRef cfg = NULL;
+        if (CGBeginDisplayConfiguration(&cfg) == kCGErrorSuccess) {
+            CGConfigureDisplayMirrorOfDisplay(cfg, _mirror, kCGNullDirectDisplay);
+            CGError err = CGCompleteDisplayConfiguration(cfg, kCGConfigureForAppOnly);
+            rdp_info("display %u no longer mirrors the virtual display (rc=%d)", _mirror, err);
+        }
+        _mirror = kCGNullDirectDisplay;
+    }
 #if MACOS_RDP_VIRTUAL_DISPLAY
     /* Release in reverse dependency order: drop the display first (stops its
      * listener thread), then the settings/mode/descriptor it referenced. */
@@ -76,6 +87,23 @@
     _did = 0;
     _created = NO;
     rdp_verbose("display released");
+}
+
+- (BOOL)mirrorOnto:(CGDirectDisplayID)display {
+    if (!_created || !_did || _did == display) return NO;
+    CGDisplayConfigRef cfg = NULL;
+    if (CGBeginDisplayConfiguration(&cfg) != kCGErrorSuccess) return NO;
+    CGConfigureDisplayMirrorOfDisplay(cfg, display, _did);
+    /* For this process only: macOS undoes it when the daemon exits, even by a
+     * crash, and the Mac gets its own desktop back. */
+    CGError err = CGCompleteDisplayConfiguration(cfg, kCGConfigureForAppOnly);
+    if (err != kCGErrorSuccess) {
+        rdp_error("display %u could not mirror the virtual display %u (%d)", display, _did, err);
+        return NO;
+    }
+    _mirror = display;
+    rdp_info("display %u mirrors the virtual display %u (%ux%u)", display, _did, _w, _h);
+    return YES;
 }
 
 - (void)setResolutionWidth:(uint32_t)width height:(uint32_t)height {

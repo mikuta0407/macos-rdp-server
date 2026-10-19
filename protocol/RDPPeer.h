@@ -33,6 +33,10 @@ typedef void (*RDPPeerMouseCallback)(void *userdata, uint16_t flags, uint16_t x,
 typedef void (*RDPPeerClipboardCallback)(void *userdata, const uint8_t *data, size_t len, uint32_t format);
 typedef void (*RDPPeerReadyCallback)(void *userdata, uint32_t width, uint32_t height, uint32_t colorDepth);
 typedef void (*RDPPeerKeyframeCallback)(void *userdata);
+/* The desktop size to announce, given the client's request in *width and *height
+ * and its scale (percent); the callee may change them. */
+typedef void (*RDPPeerDesktopSizeCallback)(void *userdata, uint32_t *width, uint32_t *height,
+                                           uint32_t scale);
 /* One decoded MACRDPX message (see external/macrdpx). Strings in it borrow
  * from the channel buffer and are valid only during the call. */
 typedef void (*RDPPeerMacrdpxCallback)(void *userdata, const mrx_message *message);
@@ -54,6 +58,9 @@ typedef struct {
     RDPPeerMouseCallback     onMouseEx;
     RDPPeerClipboardCallback onClipboard;
     RDPPeerReadyCallback     onReady;
+    /* Before the server's capabilities (Demand Active) go out: the desktop's
+     * size, which the client takes as it is. */
+    RDPPeerDesktopSizeCallback onDesktopSize;
     /* Asks the encoder to emit an IDR keyframe ASAP. Invoked when the GFX channel
      * becomes ready (frames encoded earlier were discarded, so the first sent
      * frame must be a keyframe) or when a delta arrives before any keyframe. */
@@ -171,6 +178,12 @@ bool          rdp_peer_run_once(freerdp_peer *peer);
  * out-pointers receive pointers OWNED by the FreeRDP peer settings (do not free;
  * valid for the peer's lifetime). Any out value may be NULL if the client sent
  * none. Pass NULL for fields you don't need. NEVER log the returned password. */
+/* Tells the client the user has logged on (Save Session Info, logon long), as
+ * Windows does once its session is signed in. Windows App waits for it before
+ * it sends display-control layouts: without it a phone turned round keeps
+ * the session's shape. */
+bool rdp_peer_send_logon_info(freerdp_peer *peer, const char *username, const char *domain);
+
 void rdp_peer_get_credentials(freerdp_peer *peer,
                               const char **username,
                               const char **password,

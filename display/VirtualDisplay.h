@@ -32,6 +32,12 @@ NS_ASSUME_NONNULL_BEGIN
  * fallback or the mode could not be applied. */
 - (BOOL)reconfigureWidth:(uint32_t)width height:(uint32_t)height hiDPI:(BOOL)hiDPI;
 
+/* Makes `display` (a real one) show this virtual display as its mirror, so the
+ * two are one desktop of this display's size and shape: no second desktop, no
+ * Space of its own, the windows stay where they are. Undone by -destroy, and
+ * by macOS when the daemon exits. */
+- (BOOL)mirrorOnto:(CGDirectDisplayID)display;
+
 @end
 
 NS_ASSUME_NONNULL_END

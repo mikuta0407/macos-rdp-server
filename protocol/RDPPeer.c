@@ -5,6 +5,7 @@
 #include "audio/AudioInput.h"
 
 #include <freerdp/freerdp.h>
+#include <freerdp/session.h>
 #include <freerdp/listener.h>
 #include <freerdp/server/rdpgfx.h>
 #include <freerdp/server/cliprdr.h>
@@ -342,6 +343,35 @@ static UINT gfx_frame_acknowledge(RdpgfxServerContext *gfx,
     return CHANNEL_RC_OK;
 }
 
+/* Windows App on iOS or Android: talked to as Windows talks to it (see
+ * gfx_caps_advertise). */
+static bool client_is_mobile(rdpSettings *s) {
+    uint32_t os = freerdp_settings_get_uint32(s, FreeRDP_OsMajorType);
+    return os == OSMAJORTYPE_IOS || os == OSMAJORTYPE_ANDROID;
+}
+
+/* Puts the surface on the output at (0,0). Mapping it to a scaled output, as
+ * Windows does, leaves Windows App on "configuring the remote PC" here. */
+static UINT gfx_map_surface(RdpgfxServerContext *gfx, uint16_t surfaceId) {
+    RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU ms = { 0 };
+    ms.surfaceId = surfaceId;
+    return gfx->MapSurfaceToOutput(gfx, &ms);
+}
+
+/* RDPGFX_RESET_GRAPHICS: the desktop's size and its one monitor. */
+static UINT gfx_send_reset_graphics(RdpgfxServerContext *gfx, uint32_t width, uint32_t height) {
+    MONITOR_DEF monitor = { 0 };
+    monitor.right = (INT32)width - 1;
+    monitor.bottom = (INT32)height - 1;
+    monitor.flags = MONITOR_PRIMARY;
+    RDPGFX_RESET_GRAPHICS_PDU reset = { 0 };
+    reset.width = width;
+    reset.height = height;
+    reset.monitorCount = 1;
+    reset.monitorDefArray = &monitor;
+    return gfx->ResetGraphics(gfx, &reset);
+}
+
 static UINT gfx_caps_advertise(RdpgfxServerContext *gfx,
                                 const RDPGFX_CAPS_ADVERTISE_PDU *pdu) {
     RDPPeerContext *ctx = (RDPPeerContext *)gfx->custom;
@@ -365,16 +395,27 @@ static UINT gfx_caps_advertise(RdpgfxServerContext *gfx,
      * A set the client marked as not taking AVC (AVC_DISABLED, or v8.1 without
      * AVC420_ENABLED) is only picked when none allows AVC; the surface is then
      * fed with RemoteFX Progressive (or Planar) instead of H.264. */
-    RDPGFX_CAPSET best = {0}, bestAvc = {0}, v101 = {0};
+    /* A version past the newest documented one (Windows App offers 0x000b0300)
+     * is not confirmed while a documented one is offered: it promises a
+     * protocol this server does not speak, and Windows App then never sends
+     * display-control layouts (a phone turned round keeps its shape). */
+    RDPGFX_CAPSET best = {0}, bestAvc = {0}, v101 = {0}, newer = {0};
     for (UINT16 i = 0; i < pdu->capsSetCount; i++) {
         const RDPGFX_CAPSET *cs = &pdu->capsSets[i];
-        rdp_debug("  caps[%u] version=0x%08x flags=0x%08x", i, cs->version, cs->flags);
+        rdp_verbose("  caps[%u] version=0x%08x flags=0x%08x", i, cs->version, cs->flags);
         if (cs->version < RDPGFX_CAPVERSION_8) continue;
         if (cs->version == RDPGFX_CAPVERSION_101) { v101 = *cs; continue; }
+        if (cs->version > RDPGFX_CAPVERSION_107) {
+            if (cs->version >= newer.version) newer = *cs;
+            continue;
+        }
         if (cs->version >= best.version) best = *cs;
         if (gfx_capset_allows_avc(cs) && cs->version >= bestAvc.version) bestAvc = *cs;
     }
     if (!best.version) best = v101;   /* v10.1 only as a last resort (see above) */
+    if (!best.version) best = newer;
+    if (!bestAvc.version && gfx_capset_allows_avc(&newer) && best.version == newer.version)
+        bestAvc = newer;
     if (!best.version) {
         rdp_error("client advertised no usable GFX caps version");
         return ERROR_INTERNAL_ERROR;
@@ -421,7 +462,15 @@ static UINT gfx_caps_advertise(RdpgfxServerContext *gfx,
      * which mstsc composites against the negotiated desktop dimensions directly.
      * (The earlier black screen was the P-frame-before-keyframe bug, since fixed,
      * not a missing canvas.) If multi-monitor support is added later, RESET_GRAPHICS
-     * will be needed — but the MONITOR_DEF format must be validated against mstsc. */
+     * will be needed — but the MONITOR_DEF format must be validated against mstsc.
+     *
+     * Windows App on iOS and Android does want it, as Windows sends it: without
+     * one it never sends a display-control layout, so a phone turned round
+     * keeps the session's shape. Those clients get it, before the surface. */
+    if (client_is_mobile(s)) {
+        UINT rr = gfx_send_reset_graphics(gfx, w, h);
+        rdp_info("GFX reset graphics %ux%u for a mobile client rc=%u", w, h, rr);
+    }
 
     RDPGFX_CREATE_SURFACE_PDU cs = {0};
     cs.surfaceId   = ctx->surfaceId;
@@ -430,11 +479,7 @@ static UINT gfx_caps_advertise(RdpgfxServerContext *gfx,
     cs.pixelFormat = GFX_PIXEL_FORMAT_XRGB_8888;
     gfx->CreateSurface(gfx, &cs);
 
-    RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU ms = {0};
-    ms.surfaceId     = ctx->surfaceId;
-    ms.outputOriginX = 0;
-    ms.outputOriginY = 0;
-    gfx->MapSurfaceToOutput(gfx, &ms);
+    gfx_map_surface(gfx, (uint16_t)ctx->surfaceId);
 
     ctx->gfxReady = true;
     /* Any frames encoded during GFX setup were dropped ("gfx not ready"), so demand
@@ -812,16 +857,7 @@ bool rdp_peer_resize_graphics(freerdp_peer *peer, uint32_t width, uint32_t heigh
     }
     ctx->gfxReady = false;       /* frames of the old size are dropped from here */
 
-    MONITOR_DEF monitor = { 0 };
-    monitor.left = 0; monitor.top = 0;
-    monitor.right = (INT32)width - 1; monitor.bottom = (INT32)height - 1;
-    monitor.flags = MONITOR_PRIMARY;
-    RDPGFX_RESET_GRAPHICS_PDU reset = { 0 };
-    reset.width = width;
-    reset.height = height;
-    reset.monitorCount = 1;
-    reset.monitorDefArray = &monitor;
-    UINT rc = ctx->gfx->ResetGraphics(ctx->gfx, &reset);
+    UINT rc = gfx_send_reset_graphics(ctx->gfx, width, height);
 
     /* ResetGraphics deletes every surface on the client; make a new one. */
     ctx->surfaceId++;
@@ -831,9 +867,8 @@ bool rdp_peer_resize_graphics(freerdp_peer *peer, uint32_t width, uint32_t heigh
     cs.height      = (UINT16)height;
     cs.pixelFormat = GFX_PIXEL_FORMAT_XRGB_8888;
     if (rc == CHANNEL_RC_OK) rc = ctx->gfx->CreateSurface(ctx->gfx, &cs);
-    RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU ms = { 0 };
-    ms.surfaceId = (UINT16)ctx->surfaceId;
-    if (rc == CHANNEL_RC_OK) rc = ctx->gfx->MapSurfaceToOutput(ctx->gfx, &ms);
+    if (rc == CHANNEL_RC_OK)
+        rc = gfx_map_surface(ctx->gfx, (uint16_t)ctx->surfaceId);
 
     ctx->gfxReady = rc == CHANNEL_RC_OK;
     ctx->sentKeyframe = false;
@@ -878,9 +913,10 @@ static BOOL peer_post_connect(freerdp_peer *peer) {
     if (ctx->disp) {
         ctx->disp->custom                = ctx;
         ctx->disp->rdpcontext            = peer->context;
-        ctx->disp->MaxNumMonitors        = 1;
-        ctx->disp->MaxMonitorAreaFactorA = 7680;
-        ctx->disp->MaxMonitorAreaFactorB = 4320;
+        /* What Windows offers; only the primary monitor is used. */
+        ctx->disp->MaxNumMonitors        = 16;
+        ctx->disp->MaxMonitorAreaFactorA = 8192;
+        ctx->disp->MaxMonitorAreaFactorB = 8192;
         ctx->disp->DispMonitorLayout     = disp_monitor_layout;
         ctx->disp->ChannelIdAssigned     = disp_channel_id_assigned;
         WTSVirtualChannelManagerSetDVCCreationCallback(ctx->vcm, dvc_creation_status, ctx);
@@ -1020,6 +1056,27 @@ static BOOL peer_suppress_output(rdpContext *context, BYTE allow,
     return TRUE;
 }
 
+/* Runs just before the Demand Active goes out, every time it does: the server
+ * sets the desktop's size there, and the client takes it as it is. */
+static BOOL peer_capabilities(freerdp_peer *peer) {
+    RDPPeerContext *ctx = (RDPPeerContext *)peer->context;
+    if (!ctx->callbacks.onDesktopSize) return TRUE;
+    rdpSettings *s = peer->context->settings;
+    uint32_t w = freerdp_settings_get_uint32(s, FreeRDP_DesktopWidth);
+    uint32_t h = freerdp_settings_get_uint32(s, FreeRDP_DesktopHeight);
+    uint32_t scale = freerdp_settings_get_uint32(s, FreeRDP_DesktopScaleFactor);
+    uint32_t nw = w, nh = h;
+    ctx->callbacks.onDesktopSize(ctx->callbacks.userdata, &nw, &nh, scale ? scale : 100);
+    if (nw == w && nh == h) return TRUE;
+    freerdp_settings_set_uint32(s, FreeRDP_DesktopWidth, nw);
+    freerdp_settings_set_uint32(s, FreeRDP_DesktopHeight, nh);
+    /* The client's monitors no longer fit the desktop: one monitor, the whole
+     * desktop, is announced in their place. */
+    freerdp_settings_set_uint32(s, FreeRDP_MonitorCount, 0);
+    rdp_info("desktop size %ux%u -> %ux%u", w, h, nw, nh);
+    return TRUE;
+}
+
 static BOOL peer_activate(freerdp_peer *peer) {
     RDPPeerContext *ctx = (RDPPeerContext *)peer->context;
     ctx->activated = true;
@@ -1108,6 +1165,7 @@ freerdp_peer *rdp_peer_create(int fd, const RDPPeerCallbacks *callbacks) {
     peer_apply_settings(peer);
     peer->PostConnect = peer_post_connect;
     peer->Activate    = peer_activate;
+    peer->Capabilities = peer_capabilities;
     /* Handle minimize/restore (Suppress Output) so the window doesn't come back
      * black. SuppressOutput lives on rdpUpdate in 3.x. */
     peer->context->update->SuppressOutput = peer_suppress_output;
@@ -1233,8 +1291,14 @@ bool rdp_peer_run_once(freerdp_peer *peer) {
     }
 
     /* Display control, likewise a DVC. Optional: a client without it keeps
-     * the size it connected with. RDP_DISP=0 turns it off. */
-    if (ok && ctx->disp && !ctx->dispOpened &&
+     * the size it connected with. RDP_DISP=0 turns it off. Opened, as Windows
+     * opens it, once the graphics are up and a frame has reached the client:
+     * Windows App ignores display control offered before its graphics output
+     * exists, and then never sends a layout (a phone turned round keeps its
+     * shape). Resizing needs GFX, so a client without it never gets it. */
+    bool graphicsUp = ctx->gfxReady && ctx->frameId > 0 &&
+        (ctx->gfxLastAckedFrame > 0 || ctx->frameId > 60);
+    if (ok && ctx->disp && !ctx->dispOpened && graphicsUp &&
         WTSVirtualChannelManagerGetDrdynvcState(ctx->vcm) == DRDYNVC_STATE_READY) {
         const char *dispEnv = getenv("RDP_DISP");
         ctx->dispOpened = true;     /* one attempt only */
@@ -1297,6 +1361,22 @@ bool rdp_peer_run_once(freerdp_peer *peer) {
 
 RDPGfxCodec rdp_peer_gfx_codec(freerdp_peer *peer) {
     return ((RDPPeerContext *)peer->context)->gfxCodec;
+}
+
+bool rdp_peer_send_logon_info(freerdp_peer *peer, const char *username, const char *domain) {
+    if (!peer || !peer->context || !peer->context->update ||
+        !peer->context->update->SaveSessionInfo) return false;
+    RDPPeerContext *ctx = (RDPPeerContext *)peer->context;
+    logon_info info = { 0 };
+    info.sessionId = 1;
+    info.username = (char *)(username ? username : "");
+    info.domain = (char *)(domain ? domain : "");
+    pthread_mutex_lock(&ctx->xportLock);
+    BOOL ok = peer->context->update->SaveSessionInfo(peer->context, INFO_TYPE_LOGON_LONG, &info);
+    pthread_mutex_unlock(&ctx->xportLock);
+    rdp_info("logon notice sent to the client (user='%s' domain='%s') %s",
+             info.username, info.domain, ok ? "ok" : "FAILED");
+    return ok;
 }
 
 uint32_t rdp_peer_client_os_major_type(freerdp_peer *peer) {

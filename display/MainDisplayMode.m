@@ -41,15 +41,41 @@ static double score(CGDisplayModeRef mode, double w, double h, BOOL hiDPI, doubl
     return s;
 }
 
-- (BOOL)matchPointWidth:(double)w height:(double)h hiDPI:(BOOL)hiDPI {
-    if (w < 1 || h < 1 || sRefused) return NO;
-    CGDisplayModeRef current = CGDisplayCopyDisplayMode(_displayID);
-    if (!current) return NO;
-    double refresh = CGDisplayModeGetRefreshRate(current);
+/* Copies of one mode are different objects; the low-resolution duplicate of a
+ * HiDPI mode shares its IO mode. */
+static BOOL sameMode(CGDisplayModeRef a, CGDisplayModeRef b) {
+    return CGDisplayModeGetIODisplayModeID(a) == CGDisplayModeGetIODisplayModeID(b) &&
+           CGDisplayModeGetWidth(a) == CGDisplayModeGetWidth(b) &&
+           CGDisplayModeGetHeight(a) == CGDisplayModeGetHeight(b) &&
+           CGDisplayModeGetPixelWidth(a) == CGDisplayModeGetPixelWidth(b) &&
+           fabs(CGDisplayModeGetRefreshRate(a) - CGDisplayModeGetRefreshRate(b)) < 0.01;
+}
 
+static CFArrayRef copyModes(CGDirectDisplayID displayID) {
     CFDictionaryRef options = (__bridge CFDictionaryRef)@{
         (__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES };
-    CFArrayRef modes = CGDisplayCopyAllDisplayModes(_displayID, options);
+    return CGDisplayCopyAllDisplayModes(displayID, options);
+}
+
+- (BOOL)offersHiDPI {
+    CFArrayRef modes = copyModes(_displayID);
+    BOOL found = NO;
+    for (CFIndex i = 0; modes && i < CFArrayGetCount(modes) && !found; i++) {
+        CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+        found = CGDisplayModeIsUsableForDesktopGUI(mode) && isHiDPI(mode);
+    }
+    if (modes) CFRelease(modes);
+    return found;
+}
+
+- (CGDisplayModeRef)copyModeForPointWidth:(double)w height:(double)h hiDPI:(BOOL)hiDPI {
+    CGDisplayModeRef current = CGDisplayCopyDisplayMode(_displayID);
+    if (!current || w < 1 || h < 1 || !MainDisplayMode.isEnabled) return current;
+    double refresh = CGDisplayModeGetRefreshRate(current);
+    BOOL displayWide = CGDisplayModeGetWidth(current) >= CGDisplayModeGetHeight(current);
+    if (displayWide != (w >= h)) { double t = w; w = h; h = t; }
+
+    CFArrayRef modes = copyModes(_displayID);
     CGDisplayModeRef best = NULL;
     double bestScore = INFINITY;
     for (CFIndex i = 0; modes && i < CFArrayGetCount(modes); i++) {
@@ -58,9 +84,21 @@ static double score(CGDisplayModeRef mode, double w, double h, BOOL hiDPI, doubl
         double s = score(mode, w, h, hiDPI, refresh);
         if (s < bestScore) { bestScore = s; best = mode; }
     }
-    BOOL changed = NO;
-    /* The mode in use scores as well as the best: nothing to change. */
+    /* The mode in use scores as well as the best: it stays. */
     if (best && score(current, w, h, hiDPI, refresh) > bestScore) {
+        CGDisplayModeRelease(current);
+        current = CGDisplayModeRetain(best);
+    }
+    if (modes) CFRelease(modes);
+    return current;
+}
+
+- (BOOL)matchPointWidth:(double)w height:(double)h hiDPI:(BOOL)hiDPI {
+    if (sRefused) return NO;
+    CGDisplayModeRef current = CGDisplayCopyDisplayMode(_displayID);
+    CGDisplayModeRef best = [self copyModeForPointWidth:w height:h hiDPI:hiDPI];
+    BOOL changed = NO;
+    if (current && best && !sameMode(current, best)) {
         CGDisplayConfigRef config = NULL;
         if (CGBeginDisplayConfiguration(&config) == kCGErrorSuccess) {
             CGConfigureDisplayWithDisplayMode(config, _displayID, best, NULL);
@@ -78,8 +116,8 @@ static double score(CGDisplayModeRef mode, double w, double h, BOOL hiDPI, doubl
             }
         }
     }
-    if (modes) CFRelease(modes);
-    CGDisplayModeRelease(current);
+    if (best) CGDisplayModeRelease(best);
+    if (current) CGDisplayModeRelease(current);
     return changed;
 }
 
