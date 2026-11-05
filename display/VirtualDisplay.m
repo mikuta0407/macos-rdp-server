@@ -4,6 +4,14 @@
 #define RDP_LOG_COMPONENT "display"
 #include "logging/RDPLog.h"
 
+/* CGVirtualDisplay's initialiser, declared so ARC treats the call as an init:
+ * it consumes the alloc'd receiver and returns +1. Through performSelector:
+ * ARC released the receiver again afterwards, which crashed in objc_release
+ * whenever init handed back another object or nil. */
+@protocol RDPVirtualDisplayInit
+- (nullable instancetype)initWithDescriptor:(id)descriptor;
+@end
+
 @interface VirtualDisplay ()
 @property (nonatomic, assign) CGDirectDisplayID did;
 @property (nonatomic, assign) uint32_t w;
@@ -241,11 +249,7 @@ static id make_mode(uint32_t w, uint32_t h) {
         @try { [desc setValue:dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0)
                        forKey:@"queue"]; } @catch (id e) {}
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        id vd = [[dispClass alloc] performSelector:@selector(initWithDescriptor:)
-                                         withObject:desc];
-#pragma clang diagnostic pop
+        id vd = [(id<RDPVirtualDisplayInit>)[dispClass alloc] initWithDescriptor:desc];
         if (!vd) { rdp_error("CGVirtualDisplay init failed — main display"); return; }
 
         _vdObject     = vd;
