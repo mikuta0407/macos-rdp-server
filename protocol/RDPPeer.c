@@ -1379,6 +1379,25 @@ bool rdp_peer_send_logon_info(freerdp_peer *peer, const char *username, const ch
     return ok;
 }
 
+bool rdp_peer_send_logon_failure(freerdp_peer *peer, bool passwordGiven) {
+    if (!peer || !peer->context || !peer->context->update ||
+        !peer->context->update->SaveSessionInfo || !peer->context->rdp) return false;
+    RDPPeerContext *ctx = (RDPPeerContext *)peer->context;
+    logon_info_ex info = { 0 };
+    info.haveErrorInfo = TRUE;
+    info.ErrorNotificationType = passwordGiven ? LOGON_FAILED_BAD_PASSWORD : LOGON_FAILED_OTHER;
+    info.ErrorNotificationData = 1; /* the session id rdp_peer_send_logon_info gives */
+    pthread_mutex_lock(&ctx->xportLock);
+    BOOL logonSent = peer->context->update->SaveSessionInfo(peer->context, INFO_TYPE_LOGON_EXTENDED_INF, &info);
+    freerdp_set_error_info(peer->context->rdp, ERRINFO_SERVER_FRESH_CREDENTIALS_REQUIRED);
+    BOOL errorSent = freerdp_send_error_info(peer->context->rdp);
+    pthread_mutex_unlock(&ctx->xportLock);
+    rdp_info("logon failure sent to the client (%s): logon error %s, error info %s",
+             passwordGiven ? "bad password" : "no password",
+             logonSent ? "ok" : "FAILED", errorSent ? "ok" : "FAILED");
+    return logonSent && errorSent;
+}
+
 uint32_t rdp_peer_client_os_major_type(freerdp_peer *peer) {
     if (!peer || !peer->context || !peer->context->settings) return 0;
     return freerdp_settings_get_uint32(peer->context->settings, FreeRDP_OsMajorType);

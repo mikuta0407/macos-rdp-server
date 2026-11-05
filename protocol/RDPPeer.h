@@ -184,6 +184,13 @@ bool          rdp_peer_run_once(freerdp_peer *peer);
  * the session's shape. */
 bool rdp_peer_send_logon_info(freerdp_peer *peer, const char *username, const char *domain);
 
+/* Tells the client its sign-in was refused, before the connection is closed:
+ * a logon error (Save Session Info, logon extended: LOGON_FAILED_BAD_PASSWORD,
+ * or LOGON_FAILED_OTHER when no password came) and Set Error Info
+ * ERRINFO_SERVER_FRESH_CREDENTIALS_REQUIRED. Without them the client sees only
+ * the connection dropping, which it may take for the network and retry. */
+bool rdp_peer_send_logon_failure(freerdp_peer *peer, bool passwordGiven);
+
 void rdp_peer_get_credentials(freerdp_peer *peer,
                               const char **username,
                               const char **password,

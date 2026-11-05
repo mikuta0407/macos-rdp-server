@@ -667,6 +667,7 @@ static void rdp_on_keyframe_request(void *ud) {
     if (![Authenticator validateUsername:user password:pass domain:domain]) {
         rdp_error("authentication FAILED for %s (user='%s') — rejecting connection",
                   _address.UTF8String, user.length ? user.UTF8String : "(none)");
+        rdp_peer_send_logon_failure(_peer, pass.length > 0);
         _sessionState = RDPSessionStateDisconnecting;
         return;  /* peer loop sees Disconnecting and exits → teardown, no display */
     }
