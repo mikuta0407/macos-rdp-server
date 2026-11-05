@@ -10,6 +10,7 @@
 #include <freerdp/server/rdpgfx.h>
 #include <freerdp/server/cliprdr.h>
 #include <freerdp/server/rdpsnd.h>
+#include <freerdp/codec/dsp.h>
 #include <freerdp/server/disp.h>
 #include <freerdp/server/server-common.h>
 #include <freerdp/channels/rdpgfx.h>
@@ -659,6 +660,34 @@ static uint32_t rdp_preferred_audio_rate(const RDPPeerContext *ctx) {
     return 44100;
 }
 
+/* Whether FreeRDP's encoder turns signed 16-bit PCM into the same format with
+ * every sign bit flipped, as its ffmpeg DSP does (16-bit PCM is mapped to
+ * AV_CODEC_ID_PCM_U16LE, unsigned; Homebrew's FreeRDP is built with it). The
+ * client then plays silence as full scale and every wave wrapped round - the
+ * loud distortion heard through Homebrew-linked builds. Encodes a few known
+ * frames from the client's format to itself and looks. */
+static bool rdp_pcm_encoder_flips_sign(const AUDIO_FORMAT *format) {
+    if (format->wFormatTag != WAVE_FORMAT_PCM || format->wBitsPerSample != 16) return false;
+    FREERDP_DSP_CONTEXT *dsp = freerdp_dsp_context_new(TRUE);
+    wStream *out = Stream_New(NULL, 4096);
+    bool flips = false;
+    if (dsp && out && freerdp_dsp_context_reset(dsp, format, 0)) {
+        int16_t probe[256];
+        for (size_t i = 0; i < 256; i++) probe[i] = (int16_t)((i % 2) ? 1000 : -1000);
+        size_t frames = 256 / format->nChannels;
+        if (freerdp_dsp_encode(dsp, format, (const BYTE *)probe,
+                               frames * format->nChannels * sizeof(int16_t), out) &&
+            Stream_GetPosition(out) >= 2 * sizeof(int16_t)) {
+            const int16_t *got = (const int16_t *)Stream_Buffer(out);
+            flips = got[0] == (int16_t)(probe[0] ^ 0x8000) &&
+                    got[1] == (int16_t)(probe[1] ^ 0x8000);
+        }
+    }
+    Stream_Free(out, TRUE);
+    freerdp_dsp_context_free(dsp);
+    return flips;
+}
+
 static void rdpsnd_activated(RdpsndServerContext *rdpsnd) {
     RDPPeerContext *ctx = (RDPPeerContext *)rdpsnd->data;
 
@@ -765,6 +794,10 @@ static void rdpsnd_activated(RdpsndServerContext *rdpsnd) {
                   chosen, (unsigned)committed);
     }
 
+    ctx->audioFlipsSign = rdp_pcm_encoder_flips_sign(sel);
+    if (ctx->audioFlipsSign)
+        rdp_info("this FreeRDP's encoder flips the sign of 16-bit PCM "
+                 "(ffmpeg DSP) — sending samples pre-flipped");
     ctx->audioReady = true;
     rdp_info("audio format negotiated: client idx %d (committed %u) — "
              "%u Hz, %u ch, %u-bit, tag 0x%04x — wire wFormatNo=%u, "
@@ -1670,9 +1703,19 @@ bool rdp_peer_send_audio(freerdp_peer *peer,
     if (!ctx->rdpsnd || !ctx->audioReady) return false;
     /* SendSamples(context, buf, nframes, timestamp) — real 3.x signature.
      * Audio runs on its own capture thread; serialize against the transport. */
+    int16_t *flipped = NULL;
+    if (ctx->audioFlipsSign) {
+        /* The encoder flips each sign bit; flipping first cancels it out. */
+        size_t count = (size_t)frame_count * 2;
+        flipped = (int16_t *)malloc(count * sizeof(int16_t));
+        if (!flipped) return false;
+        for (size_t i = 0; i < count; i++) flipped[i] = (int16_t)(samples[i] ^ 0x8000);
+        samples = flipped;
+    }
     pthread_mutex_lock(&ctx->xportLock);
     UINT rc = ctx->rdpsnd->SendSamples(ctx->rdpsnd, samples, frame_count, 0);
     pthread_mutex_unlock(&ctx->xportLock);
+    free(flipped);
     return rc == CHANNEL_RC_OK;
 }
 

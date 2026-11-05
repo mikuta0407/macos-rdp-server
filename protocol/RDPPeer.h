@@ -108,6 +108,11 @@ struct rdp_peer_context {
     bool                 outputSuppressed; /* client minimized: Suppress Output PDU -> pause sends */
     bool                 activated;
     bool                 audioReady; /* set by rdpsnd Activated callback */
+    /* FreeRDP built with its ffmpeg DSP encodes 16-bit PCM as unsigned
+     * (AV_CODEC_ID_PCM_U16LE), flipping each sample's sign bit; set when the
+     * linked encoder was seen doing that, so SendSamples is handed samples
+     * flipped once already. */
+    bool                 audioFlipsSign;
     /* Clipboard: the host's current data, advertised via Format List and held
      * until the client sends a Format Data Request (MS-RDPECLIP flow). Owned
      * copy — the source pasteboard pointer is only valid during the send call. */
